@@ -57,17 +57,30 @@ final class AppState {
     /// the temp dir URL so we can clean it up when the user opens something
     /// else (or when the app quits).
     private var extractedArchiveDir: URL?
+    /// Whether the active folder was loaded recursively. The file watcher
+    /// uses this so a non-recursive load doesn't trigger an O(deep tree)
+    /// rescan on every fs event — that combo was hanging the app when the
+    /// user trashed photos in a folder whose subtree was huge.
+    private var loadedRecursively: Bool = false
+    /// In-flight watcher-driven rescan. Cancelled and replaced when a new
+    /// fs event fires, so rapid-fire events (a deletion sometimes triggers
+    /// half a dozen) coalesce into a single rescan instead of stacking.
+    private var watcherRescanTask: Task<Void, Never>? = nil
     /// In-flight folder-walk task. Cancelled by `cancelScan()` (the Stop
     /// button in the loading scene) or when a new `loadFolder` starts before
     /// the previous one finishes. Whatever was found before cancel is still
     /// committed — partial results are usually what the user wanted.
     private var scanTask: Task<Void, Never>? = nil
     /// Bumped every time disk state diverges from the folder tree's cached
-    /// view — currently after a folder trash. The tree subscribes via
-    /// .onChange and re-stats nodes whose children we know about. Better
-    /// than a global notification because it stays inside @Observable
-    /// land and SwiftUI handles propagation for us.
+    /// view — currently after a folder trash. Paired with `lastRemovedFolder`
+    /// so the tree can splice the dead node out by URL instead of running a
+    /// recursive re-stat (the recursive re-stat was hanging the app for
+    /// seconds on deeply-expanded trees).
     var folderTreeChangeTick: Int = 0
+    /// URL of the most recently trashed folder. The folder tree's
+    /// `.onChange(of: folderTreeChangeTick)` listener uses this to find
+    /// and remove the dead node in a single DFS pass — no fs work.
+    private(set) var lastRemovedFolder: URL? = nil
 
     /// Everything Latent will pick up during a folder scan. Static images,
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
@@ -145,6 +158,7 @@ final class AppState {
         }
 
         folder = scanRoot
+        loadedRecursively = recursive
         // Push the user's ORIGINAL pick (which may be an archive file) to
         // the recents — re-opening from recents replays the same flow,
         // including extraction. Only push real, non-temp paths so cleaned-
@@ -189,10 +203,35 @@ final class AppState {
     }
 
     /// Cancel the in-flight folder scan. Whatever was found before cancel
-    /// gets committed — discarding partial results would punish the user
+    /// still commits — discarding partial results would punish the user
     /// for hitting Stop on a folder that already has plenty to look at.
+    /// Clears `loadPhase` synchronously so the loader vanishes the
+    /// instant Stop is clicked: the detached task is still draining
+    /// (sorting partial results + main-actor commit), but the user
+    /// shouldn't see the loader linger while that happens.
     func cancelScan() {
         scanTask?.cancel()
+        loadPhase = nil
+    }
+
+    /// Navigate to the parent of the current folder. Re-roots the folder
+    /// tree to the parent (setAsAnchor=true) — going up implies the user
+    /// wants the tree to come along, otherwise they'd have just clicked
+    /// elsewhere. No-op at filesystem root.
+    func goUp() {
+        guard let f = folder else { return }
+        let parent = f.deletingLastPathComponent()
+        // deletingLastPathComponent on "/" returns "/" — same path means
+        // we're already at the top.
+        guard parent.path != f.path else { return }
+        Task { await loadFolder(parent, setAsAnchor: true, recursive: false) }
+    }
+
+    /// True when `goUp` would do something — there's a folder loaded and
+    /// it has a real parent. Drives the toolbar button's enabled state.
+    var canGoUp: Bool {
+        guard let f = folder else { return false }
+        return f.deletingLastPathComponent().path != f.path
     }
 
     /// Walk a directory, returning all matched image URLs. `onProgress` is
@@ -261,12 +300,15 @@ final class AppState {
         return found
     }
 
-    /// File-watcher rescan path. No streaming, no cancellation — watchers
-    /// fire on small fs diffs where running to completion is cheap.
-    private static func scanFolderRecursive(_ root: URL) async -> [URL] {
+    /// File-watcher rescan path. Honors the load's recursive flag so a
+    /// non-recursive folder doesn't trigger a full-tree walk on every fs
+    /// event. Cancellable: the watcher cancels an in-flight rescan when a
+    /// new event fires, so rapid-fire events coalesce.
+    private static func walkAndSort(_ root: URL, recursive: Bool) async -> [URL] {
         let basePath = root.path
         return await Task.detached(priority: .utility) {
-            var all = await walkFolder(root, recursive: true)
+            var all = await walkFolder(root, recursive: recursive)
+            if Task.isCancelled { return all }
             all.sort { lhs, rhs in
                 let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
                 let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
@@ -292,14 +334,24 @@ final class AppState {
         // running they get inconsistent state until they reopen the folder.
         source.setEventHandler { [weak self] in
             guard let self else { return }
+            // Cancel any rescan that's still chewing through the fs from a
+            // previous event in this same burst. A bulk delete or trash
+            // sweep typically fires several events; without coalescing we
+            // ran one full recursive walk per event, which on a 50k-photo
+            // folder hung the app.
+            self.watcherRescanTask?.cancel()
             // Preserve the user's current selection across the rescan.
             let previousURL = self.selectedIndex.flatMap { idx in
                 idx < self.imageURLs.count ? self.imageURLs[idx] : nil
             }
-            Task { @MainActor in
-                let urls = await Self.scanFolderRecursive(url)
+            let recursive = self.loadedRecursively
+            self.watcherRescanTask = Task { @MainActor [weak self] in
+                let urls = await Self.walkAndSort(url, recursive: recursive)
+                guard let self else { return }
+                if Task.isCancelled { return }
                 self.imageURLs = urls
-                self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) } ?? (urls.isEmpty ? nil : 0)
+                self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) }
+                                    ?? (urls.isEmpty ? nil : 0)
             }
         }
         source.setCancelHandler { close(fd) }
@@ -341,6 +393,8 @@ final class AppState {
     func stopWatching() {
         fileWatcher?.cancel()
         fileWatcher = nil
+        watcherRescanTask?.cancel()
+        watcherRescanTask = nil
     }
 
     /// Move an image to the user's Trash. Reversible — the file ends up in
@@ -379,19 +433,54 @@ final class AppState {
         trashImage(at: imageURLs[i])
     }
 
-    /// Move a whole folder to the Trash. If it's the active folder, close
-    /// the album. If it's listed in recents, drop it. Bumps the tree
-    /// change tick so the FolderTreeView re-stats and removes the row.
+    /// Move a whole folder to the Trash. The actual `trashItem` call hops
+    /// to a background task — under the hood it talks to NSFileCoordinator
+    /// + the Finder XPC service for the trash sound/animation, and on
+    /// folders that block was hanging the app for seconds. Once the syscall
+    /// returns, we apply consequences on main: close the album if the
+    /// trashed folder was active, drop it from recents, prune any photos
+    /// that lived inside it from imageURLs, and signal the folder tree to
+    /// splice the dead node out (targeted DFS, not a recursive re-stat).
     func trashFolder(at url: URL) {
-        do {
-            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        } catch {
-            lastError = "Couldn't move folder to Trash: \(error.localizedDescription)"
-            return
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let trashError: Error?
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                trashError = nil
+            } catch {
+                trashError = error
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let trashError {
+                    self.lastError = "Couldn't move folder to Trash: \(trashError.localizedDescription)"
+                    return
+                }
+                if url == self.folder { self.closeFolder() }
+                self.recents.remove(url)
+
+                // Optimistic prune: anything inside the trashed folder is
+                // gone, drop it from the photo list right away. The file
+                // watcher will rescan and arrive at the same answer
+                // moments later, but the user gets immediate feedback.
+                let trashedPath = url.path
+                let prefix = trashedPath.hasSuffix("/") ? trashedPath : trashedPath + "/"
+                let beforeCount = self.imageURLs.count
+                self.imageURLs.removeAll { $0.path.hasPrefix(prefix) }
+                if self.imageURLs.count != beforeCount, let sel = self.selectedIndex {
+                    self.selectedIndex = self.imageURLs.isEmpty
+                        ? nil
+                        : min(sel, self.imageURLs.count - 1)
+                }
+
+                // Tell the folder tree which URL to drop. The listener does
+                // a single DFS to splice the node out — no per-node fs
+                // re-stat (which on a deeply-expanded tree was the other
+                // hang vector).
+                self.lastRemovedFolder = url
+                self.folderTreeChangeTick &+= 1
+            }
         }
-        if url == folder { closeFolder() }
-        recents.remove(url)
-        folderTreeChangeTick &+= 1
     }
 
     /// Close the current album: drop selection + URL list, swap back to the
