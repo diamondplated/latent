@@ -52,15 +52,20 @@ struct DetailView: View {
                 Color.black
                 content
             }
+            // Explicit hit-test shape so pan / zoom / double-click gestures
+            // register over the WHOLE pane — not only the actual image
+            // pixels. Without this, letterboxed photos (any photo whose
+            // aspect ratio doesn't match the pane) had dead zones around
+            // the image where clicks did nothing.
+            .contentShape(Rectangle())
             .overlay(alignment: .topLeading) { infoBar }
             .overlay(alignment: .bottomTrailing) { positionBadge }
             .overlay(alignment: .topTrailing) { showingOriginalBadge }
             .overlay(alignment: .bottom) { zoomHint }
             .gesture(panGesture)
             .gesture(magnifyGesture)
-            // Double-tap on a specific point: zoom in 4× centered on that
-            // point. If already zoomed, second double-tap resets to fit.
-            // Mirrors Photos.app / Preview behavior.
+            // Double-tap on a specific point: cycles 1x → 2x → 3x → 4x →
+            // back to fit, recentering on the clicked spot each time.
             .onTapGesture(count: 2, coordinateSpace: .local) { location in
                 handleDoubleTap(at: location, paneSize: geo.size)
             }
