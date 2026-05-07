@@ -194,11 +194,14 @@ struct FolderRowView: View {
                     in: RoundedRectangle(cornerRadius: 4))
         .padding(.horizontal, 4)
         .contentShape(Rectangle())
-        // Tree-driven loads do NOT update the anchor — the tree stays
-        // pinned at whatever the user originally opened, so they can drill
-        // and back out without re-rooting.
+        // Tree-driven loads:
+        //   - Don't reset the anchor (tree stays pinned where the user
+        //     originally opened, so they can drill + back out freely).
+        //   - Don't recurse (the tree IS the navigation; recursing into
+        //     subfolders would defeat the point — clicking a parent would
+        //     show the same flat photo list as any descendant).
         .onTapGesture {
-            Task { await state.loadFolder(node.url, setAsAnchor: false) }
+            Task { await state.loadFolder(node.url, setAsAnchor: false, recursive: false) }
         }
     }
 
