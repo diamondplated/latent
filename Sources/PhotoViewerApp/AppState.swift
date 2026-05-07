@@ -162,6 +162,20 @@ final class AppState {
     /// made later by `MediaTyping.detect` per file.
     static var imageExtensions: Set<String> { MediaTyping.allMediaExts }
 
+    /// Where macOS saves screenshots. Reads the `com.apple.screencapture`
+    /// `location` default that's set by ⌘⇧5 → Options → Save to. Falls
+    /// back to `~/Desktop` (the system default). Used by the empty-state
+    /// "Screenshots" quick-access button so triaging your screen capture
+    /// pile is one click away.
+    static var screenshotsFolderURL: URL {
+        let defaults = UserDefaults(suiteName: "com.apple.screencapture")
+        if let raw = defaults?.string(forKey: "location"), !raw.isEmpty {
+            let expanded = NSString(string: raw).expandingTildeInPath
+            return URL(fileURLWithPath: expanded)
+        }
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop")
+    }
+
     /// Open a folder/archive picker; on selection, scan (recursively) and
     /// watch the folder. Archive selections are extracted to a temp dir
     /// transparently.

@@ -532,7 +532,35 @@ struct ThumbnailCell: View {
         }
         .opacity(isRejected ? 0.5 : 1.0)
         .onHover { hovered = $0 }
+        // Drag-out: dragging a thumbnail to Finder, Mail, Messages,
+        // Photoshop, etc. delivers the underlying file URL — the same
+        // payload Finder gives them. Single-thumbnail drag (multi-drag
+        // is doable via Transferable but punted to v2; bulk-trash via
+        // multi-select covers most batch flows).
+        .draggable(url) {
+            // Drag preview: a small version of the thumbnail itself if
+            // we've decoded it, otherwise a generic file icon.
+            Group {
+                if let image {
+                    Image(decorative: image, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 96, height: 96)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 96, height: 96)
+                }
+            }
+        }
         .contextMenu {
+            // ShareLink wraps NSSharingServicePicker — gets us AirDrop,
+            // Mail, Messages, Notes, plus any apps that registered a
+            // share extension (Photoshop, etc.) for free.
+            ShareLink(item: url) {
+                Label("Share…", systemImage: "square.and.arrow.up")
+            }
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } label: {
