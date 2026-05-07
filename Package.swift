@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "PhotoML", targets: ["PhotoML"]),
         .library(name: "PhotoSearch", targets: ["PhotoSearch"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
+        .executable(name: "PhotoViewerApp", targets: ["PhotoViewerApp"]),
     ],
     targets: [
         .target(
@@ -43,6 +44,11 @@ let package = Package(
             name: "PipelineCLI",
             dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch"],
             path: "Sources/PipelineCLI"
+        ),
+        .executableTarget(
+            name: "PhotoViewerApp",
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML"],
+            path: "Sources/PhotoViewerApp"
         ),
         .testTarget(
             name: "PipelineCoreTests",

@@ -18,21 +18,27 @@ What's working:
   - `Upscale` (Real-ESRGAN x4plus / SwinIR-L)
   - `Sharpen` (classical unsharp mask)
 - ✅ `PhotoIO` library — `ImageReader` / `ImageWriter` with EXIF round-trip, orientation baking (canonical-up pixels for the pipeline), color-space awareness (sRGB / Display P3 / Adobe RGB / ProPhoto), `preserveMetadata: false` for privacy exports
-- ✅ `PhotoML` library — `TileExecutor` (tile + feathered seam blending for arbitrary-resolution images), `CoreMLImageModel` (image-to-image inference with NCHW/NHWC, FP32/FP16, RGB/BGR, configurable input range), `ModelRegistry` + `ModelManager` (lazy-load with negative caching)
-- ✅ `Upscale.process()` is real: uses Real-ESRGAN x2 model if `Resources/Models/upscale-realesrgan-x2.mlpackage` is present, falls back to Lanczos resize otherwise — output dimensions are consistent regardless
-- ✅ `pv-pipeline` CLI — 13 self-verification scenarios
+- ✅ `PhotoML` library — `TileExecutor` (tile + feathered seam blending), `CoreMLImageModel` (image-to-image and tensor-output models), `ModelRegistry` + `ModelManager` (lazy-load with negative caching), `FaceDetector` (Apple Vision), `FaceComposite` (crop, resize, alpha-blend)
+- ✅ All 5 enhancement stages wired:
+  - `Sharpen` — Core Image unsharp mask, no model needed
+  - `Upscale` — Real-ESRGAN x2 model if present, Lanczos resize fallback
+  - `Denoise` (NAFNet), `ArtifactRemoval` (FBCNN) — model if present, identity passthrough otherwise
+  - `FaceRestore` (GFPGAN) — Vision face detection → per-face crop → model → feathered alpha composite; fast-paths to identity if no faces detected or model unavailable
+- ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), `SearchEngine` (folder walk + index-or-skip + image-image queries). **Text-query path is stubbed** pending the BPE tokenizer port.
+- ✅ `PhotoViewerApp` — minimal SwiftUI app: folder picker → thumbnail grid → detail view, arrow-key navigation, file-system watch for hot-reload. No vim keymap, A/B compare, or pipeline UI yet.
+- ✅ `pv-pipeline` CLI — 17 self-verification scenarios
 
 What's stubbed:
 
-- 🚧 Other stages (`ArtifactRemoval`, `Denoise`, `FaceRestore`, `Sharpen`) still return input unchanged. They use the same `Stage` protocol, so wiring each to a CoreML model is mechanical: convert the model, point the registry at it, plug `ModelManager.shared.model(for:)` into `process()`.
-- 🚧 No face detection (Apple Vision integration for `FaceRestore`)
-- 🚧 No SwiftUI app target (this is a Swift Package; the app target is added in milestone 4)
+- 🚧 CLIP text encoder works (model converts cleanly), but the BPE tokenizer is a Swift port of `clip.simple_tokenizer` — ~200 lines, its own milestone. Image-image search works fully without it.
+- 🚧 SwiftUI app is minimal — no vim keymap, no A/B compare, no in-app pipeline controls yet. App target is a Swift Package executable, not a proper Xcode app bundle (no code signing, no entitlements, no app icon). Migration to Xcode project is a separate milestone.
 
 ## Build & verify
 
 ```bash
 swift build
-swift run pv-pipeline
+swift run pv-pipeline                  # run the verifier
+swift run PhotoViewerApp               # launch the SwiftUI viewer
 ```
 
 Expected output:
@@ -76,15 +82,21 @@ photo-viewer/
 ├── Package.swift
 ├── Sources/
 │   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage/CVPixelBuffer bridges
-│   ├── EnhancementStages/     # The 5 stages; Upscale is wired to CoreML, others are stubs
+│   ├── EnhancementStages/     # The 5 stages, all wired
 │   ├── PhotoIO/               # ImageReader / ImageWriter / ImageMetadata
-│   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager
-│   └── PipelineCLI/           # `pv-pipeline` runner + self-verifier
+│   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager / FaceDetector / FaceComposite
+│   ├── PhotoSearch/           # EmbeddingVector / EmbeddingIndex / CLIPImageEncoder / SearchEngine (text encoder stubbed)
+│   ├── PipelineCLI/           # `pv-pipeline` runner + self-verifier
+│   └── PhotoViewerApp/        # Minimal SwiftUI viewer
 ├── Resources/
 │   └── Models/                # .mlpackage files land here (gitignored)
 ├── scripts/
-│   ├── convert_realesrgan.py  # PyTorch → CoreML conversion for Real-ESRGAN x2
-│   └── requirements.txt       # Python deps for the conversion script
+│   ├── convert_realesrgan.py  # Upscale: Real-ESRGAN x2
+│   ├── convert_nafnet.py      # Denoise: NAFNet-SIDD
+│   ├── convert_fbcnn.py       # Artifact removal: FBCNN
+│   ├── convert_gfpgan.py      # Face restore: GFPGAN v1.4
+│   ├── convert_openclip.py    # Search: OpenCLIP ViT-B/32 (image + text encoders)
+│   └── requirements.txt
 └── Tests/
     └── PipelineCoreTests/     # XCTest target (needs Xcode)
 ```
@@ -110,19 +122,21 @@ In order of dependency:
 
 1. ~~**Image I/O module**~~ — done. CGImageSource/CGImageDestination based reader and writer, EXIF preserved with orientation baking. CVPixelBuffer-backed `ImageBuffer` deferred until the CoreML wiring needs it.
 
-2. ~~**First real model: Real-ESRGAN x2**~~ — Swift side done (TileExecutor + CoreML wrapper + Upscale wiring + Lanczos fallback). Run `python3 scripts/convert_realesrgan.py` to produce the `.mlpackage` and the model becomes active.
+2. ~~**Real-ESRGAN x2**~~ + ~~remaining 4 stages~~ — done. Run any of the `scripts/convert_*.py` to populate models. Without them, stages gracefully degrade (Sharpen still works classically, Upscale falls back to Lanczos, others pass through).
+3. ~~**Search infrastructure**~~ — done for image-image. Text-query needs the BPE tokenizer port (next).
+4. ~~**SwiftUI app shell**~~ — minimal version done; folder picker, thumbnail grid, detail view, arrow nav.
 
-3. **Remaining 4 models** (3-4 weeks) — FBCNN, NAFNet, GFPGAN, OpenCLIP. GFPGAN needs face detection (Apple Vision framework) + alpha-blend composition.
+5. **CLIP BPE tokenizer in Swift** (~1 week) — port `clip.simple_tokenizer` so text queries work. Vocab + merges files live in app bundle resources.
 
-4. **SwiftUI app target** (4-6 weeks) — switch from Swift Package to mixed Package + Xcode project; folder browse view, image display with Metal, vim keymap dispatcher, per-stage UI.
+6. **SwiftUI app polish** (4-6 weeks) — vim keymap dispatcher, A/B compare with synced zoom/pan, in-app pipeline UI (per-stage toggles + sliders + live preview), Metal-backed image renderer for proper color management, MapKit-based map view with GPS clustering.
 
-5. **System integration** (2-3 weeks) — Quick Look extension target, default-app registration, CLI tool, drag in/out.
+7. **Migrate to Xcode project** (1-2 weeks) — proper bundle, code signing, sandbox entitlements, app icon, App Store packaging.
 
-6. **AI features** (3-4 weeks) — natural language search index (OpenCLIP image+text embeddings), MapKit-based map view with GPS clustering.
+8. **System integration** (2-3 weeks) — Quick Look extension target, default-app registration, drag in/out from Finder.
 
-7. **Polish + beta** (4-6 weeks) — perf tuning on real 50MP+ images, lazy-download flow for models, App Store submission.
+9. **Polish + beta** (4-6 weeks) — perf tuning on real 50MP+ images, lazy-download flow for models, App Store submission.
 
-Total: ~5-7 months for one engineer to v1, matching the plan.
+Most of the original 5-7 month plan got front-loaded into this scaffold; remaining work is largely UI polish, the tokenizer port, and Xcode/App-Store packaging.
 
 ## License
 
