@@ -8,20 +8,12 @@ struct DetailView: View {
     /// EnhancementState now lives at the BrowserView level (so the keypress
     /// handler can drive `blinking`). Passed in as @Bindable.
     @Bindable var enhanceState: EnhancementState
-    /// Annotation editor — shared with BrowserView so vim keypresses can be
-    /// suppressed while drawing.
-    @Bindable var annotationState: AnnotationState
     /// Shared zoom/pan across single-pane and side-by-side modes. Reset on
     /// selection change so each new photo opens at fit-to-window.
     @State private var zoom: CGFloat = 1.0
     @State private var pan: CGSize = .zero
     @GestureState private var transientPan: CGSize = .zero
     @GestureState private var transientZoom: CGFloat = 1.0
-    /// Pane size at last layout — used by the annotation export pipeline to
-    /// rescale annotations from pane-space to image-pixel-space.
-    @State private var paneSize: CGSize = .zero
-    /// Toast for annotation Save / Copy success messages.
-    @State private var toastMessage: String? = nil
 
     var currentURL: URL? {
         guard let i = state.selectedIndex, i < state.imageURLs.count else { return nil }
@@ -40,9 +32,6 @@ struct DetailView: View {
             // user doesn't open a fresh photo at the previous photo's pan.
             zoom = 1.0
             pan = .zero
-            // Bind annotation state to the new URL — annotations don't
-            // travel between photos.
-            annotationState.bind(to: currentURL)
         }
     }
 
@@ -53,125 +42,17 @@ struct DetailView: View {
         ZStack {
             Color.black
             content
-            // The annotation overlay sits ABOVE the image and below the
-            // chrome. It's always present (so existing annotations stay
-            // visible) but only intercepts input when annotation mode is on.
-            AnnotationOverlay(state: annotationState, isInteractive: annotationState.isActive)
-                .padding(8) // mirror the image pane's padding so coords align
         }
-        .background(
-            // Track the pane size for the export pipeline. GeometryReader
-            // would be cleaner but PreferenceKey + onChange is simpler here.
-            GeometryReader { geo in
-                Color.clear.onAppear { paneSize = geo.size }
-                    .onChange(of: geo.size) { _, new in paneSize = new }
-            }
-        )
         .overlay(alignment: .topLeading) { infoBar }
         .overlay(alignment: .bottomTrailing) { positionBadge }
         .overlay(alignment: .topTrailing) { showingOriginalBadge }
-        .overlay(alignment: .top) { annotateModeButton }
-        .overlay(alignment: .bottom) { bottomChrome }
-        .gesture(panGesture, including: annotationState.isActive ? .none : .all)
-        .gesture(magnifyGesture, including: annotationState.isActive ? .none : .all)
+        .overlay(alignment: .bottom) { zoomHint }
+        .gesture(panGesture)
+        .gesture(magnifyGesture)
         .onTapGesture(count: 2) {
-            guard !annotationState.isActive else { return }
             withAnimation(.spring(duration: 0.25)) {
                 zoom = 1.0
                 pan = .zero
-            }
-        }
-    }
-
-    /// Pill in the top-center: shows whether annotation mode is on, click
-    /// to toggle. Hidden in side-by-side compare to keep that mode focused.
-    private var annotateModeButton: some View {
-        Group {
-            if enhanceState.displayMode != .sideBySide {
-                Button {
-                    annotationState.isActive.toggle()
-                } label: {
-                    Label(
-                        annotationState.isActive ? "Annotating" : "Annotate",
-                        systemImage: annotationState.isActive ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle"
-                    )
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(annotationState.isActive ? Color.accentColor : .clear,
-                                in: Capsule())
-                    .foregroundStyle(annotationState.isActive ? .white : .primary)
-                    .overlay(Capsule().strokeBorder(.tertiary, lineWidth: 0.5))
-                    .background(.thinMaterial, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .padding(12)
-                .keyboardShortcut("a", modifiers: [.command])
-            }
-        }
-    }
-
-    /// Annotation toolbar (when annotating) or zoom hint (when not). Stack
-    /// the toast at the very bottom so success messages don't fight with
-    /// the toolbar for screen real estate.
-    @ViewBuilder
-    private var bottomChrome: some View {
-        VStack(spacing: 6) {
-            if let toastMessage {
-                Text(toastMessage)
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.regularMaterial, in: Capsule())
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-            if annotationState.isActive {
-                AnnotationToolbar(
-                    state: annotationState,
-                    onCopy: copyAnnotated,
-                    onSave: saveAnnotated
-                )
-            } else {
-                zoomHint
-            }
-        }
-        .padding(.bottom, 12)
-    }
-
-    private func saveAnnotated() {
-        guard let url = currentURL else { return }
-        do {
-            let outURL = try AnnotationExport.saveAnnotated(
-                sourceURL: url,
-                annotations: annotationState.annotations,
-                paneSize: paneSize
-            )
-            showToast("Saved \(outURL.lastPathComponent)")
-        } catch {
-            showToast("Save failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func copyAnnotated() {
-        guard let url = currentURL else { return }
-        do {
-            try AnnotationExport.copyAnnotatedToClipboard(
-                sourceURL: url,
-                annotations: annotationState.annotations,
-                paneSize: paneSize
-            )
-            showToast("Copied to clipboard")
-        } catch {
-            showToast("Copy failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func showToast(_ message: String) {
-        withAnimation(.easeInOut(duration: 0.2)) { toastMessage = message }
-        Task {
-            try? await Task.sleep(for: .seconds(2.5))
-            await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.2)) { toastMessage = nil }
             }
         }
     }

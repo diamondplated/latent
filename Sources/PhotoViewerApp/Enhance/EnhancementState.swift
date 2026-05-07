@@ -26,13 +26,18 @@ final class EnhancementState {
 
     // MARK: - Per-stage state
 
-    var artifactRemovalEnabled: Bool = true
+    // Defaults: stages that work today (Sharpen + Upscale-via-Lanczos) are
+    // ON; placebo stages (need a model file the user hasn't installed) are
+    // OFF. The user can flip them on later, but `buildSteps()` will still
+    // gate on the actual model presence so the pipeline never wastes time
+    // running an identity-passthrough.
+    var artifactRemovalEnabled: Bool = false
     var artifactRemovalParams: ArtifactRemoval.Params = .init()
 
-    var denoiseEnabled: Bool = true
+    var denoiseEnabled: Bool = false
     var denoiseParams: Denoise.Params = .init()
 
-    var faceRestoreEnabled: Bool = true
+    var faceRestoreEnabled: Bool = false
     var faceRestoreParams: FaceRestore.Params = .init()
 
     var upscaleEnabled: Bool = true
@@ -304,29 +309,36 @@ final class EnhancementState {
     }
 
     private func buildSteps() -> [PipelineStep] {
-        // The order here matches StandardPipeline.defaultSteps. Stage IDs are
-        // unique within the chain (Pipeline preconditions on this), so we list
-        // each stage exactly once and rely on the `enabled` flag to bypass.
+        // Each stage's effective-enabled is (user toggle) AND (the stage is
+        // actually operational — i.e., either classical or has its model
+        // installed, or has a useful fallback). Placebo stages get gated off
+        // here so the pipeline never wastes a step on identity passthrough,
+        // even if the user hasn't manually toggled them off in the UI.
         [
             PipelineStep(
                 stage: AnyStage(ArtifactRemoval(), params: artifactRemovalParams),
                 enabled: artifactRemovalEnabled
+                    && StageStatusResolver.artifactRemoval().isOperational
             ),
             PipelineStep(
                 stage: AnyStage(Denoise(), params: denoiseParams),
                 enabled: denoiseEnabled
+                    && StageStatusResolver.denoise().isOperational
             ),
             PipelineStep(
                 stage: AnyStage(FaceRestore(), params: faceRestoreParams),
                 enabled: faceRestoreEnabled
+                    && StageStatusResolver.faceRestore().isOperational
             ),
             PipelineStep(
                 stage: AnyStage(Upscale(), params: upscaleParams),
                 enabled: upscaleEnabled
+                    && StageStatusResolver.upscale(scale: upscaleParams.scale).isOperational
             ),
             PipelineStep(
                 stage: AnyStage(Sharpen(), params: sharpenParams),
                 enabled: sharpenEnabled
+                    && StageStatusResolver.sharpen().isOperational
             ),
         ]
     }
