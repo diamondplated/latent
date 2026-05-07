@@ -1,11 +1,12 @@
 import Foundation
 import CoreGraphics
+import CoreVideo
 
-// CGImage ⇄ ImageBuffer interop.
+// CGImage ⇄ ImageBuffer interop, plus CVPixelBuffer for ML inference.
 //
 // Lives in PipelineCore because every image-touching module (I/O, ML inference,
-// UI rendering) needs to bridge to/from CGImage. CoreGraphics is a free
-// dependency on Apple platforms.
+// UI rendering) needs to bridge to/from these system types. CoreGraphics and
+// CoreVideo are free dependencies on Apple platforms.
 
 public enum ImageBufferBridgeError: Error, CustomStringConvertible {
     case workingColorSpaceUnavailable
@@ -131,4 +132,105 @@ private func workingBitmapInfo(format: ImageFormat) -> CGBitmapInfo {
         | CGImageAlphaInfo.premultipliedLast.rawValue
         | CGBitmapInfo.byteOrder16Little.rawValue
     return CGBitmapInfo(rawValue: raw)
+}
+
+// MARK: - CVPixelBuffer interop (CoreML / Vision)
+
+extension ImageBuffer {
+
+    /// Produce a CVPixelBuffer copy of the buffer in BGRA8 (the most common
+    /// image-typed CoreML input). Picks BGRA8 specifically because:
+    /// - CoreML accepts it natively (no autoconversion penalty)
+    /// - Vision framework defaults to it
+    /// - It's IOSurface-backed for zero-copy Metal interop
+    ///
+    /// Note: this conversion is destructive of the working format's float16
+    /// precision (output is 8-bit). For models that need float32 RGB tensors,
+    /// use the MLMultiArray path in the model wrapper instead.
+    public func makeBGRA8PixelBuffer() throws -> CVPixelBuffer {
+        let cgImage = try makeCGImage()
+
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
+            &pb
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer = pb else {
+            throw ImageBufferBridgeError.unsupportedFormat(reason: "CVPixelBufferCreate failed: status=\(status)")
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            throw ImageBufferBridgeError.unsupportedFormat(reason: "CVPixelBuffer has no base address")
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: space,
+            bitmapInfo: bitmapInfo
+        ) else {
+            throw ImageBufferBridgeError.contextCreationFailed
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return pixelBuffer
+    }
+
+    /// Read a CVPixelBuffer into the working format. Source format must be
+    /// either BGRA8 or RGBA8; other formats can be added as needed.
+    public static func fromCVPixelBuffer(_ pixelBuffer: CVPixelBuffer) throws -> ImageBuffer {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        guard pixelFormat == kCVPixelFormatType_32BGRA || pixelFormat == kCVPixelFormatType_32RGBA else {
+            throw ImageBufferBridgeError.unsupportedFormat(
+                reason: "expected BGRA8 or RGBA8 CVPixelBuffer, got \(String(format: "0x%08x", pixelFormat))"
+            )
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            throw ImageBufferBridgeError.unsupportedFormat(reason: "CVPixelBuffer has no base address")
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let bitmapInfo: UInt32
+        if pixelFormat == kCVPixelFormatType_32BGRA {
+            bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        } else {
+            bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        }
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: space,
+            bitmapInfo: bitmapInfo
+        ),
+        let sourceCGImage = context.makeImage() else {
+            throw ImageBufferBridgeError.contextCreationFailed
+        }
+
+        return try fromCGImage(sourceCGImage)
+    }
 }

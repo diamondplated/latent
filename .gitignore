@@ -19,6 +19,11 @@ xcuserdata/
 Resources/Models/*.mlpackage
 Resources/Models/*.mlmodelc
 
+# Conversion-script artifacts
+scripts/weights/
+scripts/.venv-convert/
+.venv-convert/
+
 # Test fixtures
 Tests/Fixtures/*.heic
 Tests/Fixtures/*.jpg

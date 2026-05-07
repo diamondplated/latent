@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 import PipelineCore
 import EnhancementStages
 import PhotoIO
+import PhotoML
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -27,6 +28,9 @@ struct PipelineCLI {
         failures += await runVerification("image I/O round-trips a JPEG through reader+writer", check: jpegRoundTrip)
         failures += await runVerification("reader bakes EXIF orientation into pixels (axes swap for orientation 6)", check: orientationBaking)
         failures += await runVerification("writer with preserveMetadata=false strips EXIF", check: privacyExportStripsMetadata)
+        failures += await runVerification("TileExecutor single-tile fast path is exact identity", check: tileExecutorSingleTile)
+        failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
+        failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
 
         print()
         if failures == 0 {
@@ -299,19 +303,21 @@ func jpegRoundTrip() async throws {
     try require(metadata.sourceFormat == .jpeg, "expected sourceFormat .jpeg, got \(String(describing: metadata.sourceFormat))")
     try require(metadata.colorSpace == .sRGB, "expected sRGB color space, got \(metadata.colorSpace)")
 
-    // Run through the standard pipeline (identity stages) to validate the buffer
-    // is a real working buffer that survives the DAG.
+    // Run through the standard pipeline. Upscale scale=2 doubles dims.
+    // (Without a CoreML model on disk, Upscale falls back to Lanczos resize,
+    // which still produces 2x output — same dimension contract.)
     let cache = IntermediateCache(maxBytes: 16 * 1024 * 1024)
     let pipeline = Pipeline(steps: StandardPipeline.defaultSteps(), cache: cache)
     let processed = try await pipeline.run(input: buffer)
-    try require(processed.width == 64 && processed.height == 48, "pipeline changed dimensions")
+    try require(processed.width == 128 && processed.height == 96,
+                "expected 2x dims (128x96), got \(processed.width)x\(processed.height)")
 
     let writer = ImageWriter()
     try writer.write(buffer: processed, metadata: metadata, to: out)
 
-    // Re-read written file and verify it loads back at correct dimensions.
     let (buf2, meta2) = try reader.read(url: out)
-    try require(buf2.width == 64 && buf2.height == 48, "round-tripped dimensions wrong: \(buf2.width)x\(buf2.height)")
+    try require(buf2.width == 128 && buf2.height == 96,
+                "round-tripped dimensions wrong: \(buf2.width)x\(buf2.height)")
     try require(meta2.sourceFormat == .jpeg, "round-tripped format not JPEG")
 }
 
@@ -336,6 +342,46 @@ func orientationBaking() async throws {
     try require(buffer.height == 100, "expected baked height 100, got \(buffer.height)")
 }
 
+// MARK: - TileExecutor helpers
+
+/// Build a buffer with a deterministic gradient pattern.
+func makeGradientBuffer(width: Int, height: Int) -> ImageBuffer {
+    let pixelCount = width * height
+    var data = Data(count: pixelCount * 4 * MemoryLayout<Float16>.size)
+    data.withUnsafeMutableBytes { rawPtr in
+        let dst = rawPtr.bindMemory(to: Float16.self).baseAddress!
+        for y in 0..<height {
+            for x in 0..<width {
+                let p = y * width + x
+                dst[p * 4 + 0] = Float16(Float(x) / Float(max(1, width - 1)))
+                dst[p * 4 + 1] = Float16(Float(y) / Float(max(1, height - 1)))
+                dst[p * 4 + 2] = Float16((Float(x) + Float(y)) / Float(max(1, width + height - 2)))
+                dst[p * 4 + 3] = 1.0
+            }
+        }
+    }
+    return ImageBuffer(width: width, height: height, format: .working, pixels: data)
+}
+
+/// Mean absolute difference between two RGB channels (alpha excluded).
+func meanAbsoluteRGBDifference(_ a: ImageBuffer, _ b: ImageBuffer) -> Double {
+    precondition(a.width == b.width && a.height == b.height)
+    let pixelCount = a.width * a.height
+    var sum: Double = 0
+    a.pixels.withUnsafeBytes { aRaw in
+        b.pixels.withUnsafeBytes { bRaw in
+            let aP = aRaw.bindMemory(to: Float16.self).baseAddress!
+            let bP = bRaw.bindMemory(to: Float16.self).baseAddress!
+            for p in 0..<pixelCount {
+                for c in 0..<3 {
+                    sum += abs(Double(aP[p * 4 + c]) - Double(bP[p * 4 + c]))
+                }
+            }
+        }
+    }
+    return sum / Double(pixelCount * 3)
+}
+
 func privacyExportStripsMetadata() async throws {
     let src = tempURL("jpg")
     let out = tempURL("jpg")
@@ -358,4 +404,64 @@ func privacyExportStripsMetadata() async throws {
     // pixels), and there should be no carry-over of the original orientation.
     let (_, meta2) = try reader.read(url: out)
     try require(meta2.originalOrientation == .up, "preserveMetadata=false should still write orientation=up; got \(meta2.originalOrientation)")
+}
+
+// MARK: - TileExecutor verifications
+
+func tileExecutorSingleTile() async throws {
+    // Buffer fits in one tile → fast path with no blending.
+    let input = makeGradientBuffer(width: 64, height: 64)
+    let executor = TileExecutor(tileSize: 128, overlap: 16, scale: 1)
+    let output = try await executor.execute(input: input) { tile in tile }
+
+    try require(output.width == 64 && output.height == 64, "expected 64x64, got \(output.width)x\(output.height)")
+    try require(output.pixels == input.pixels, "single-tile fast path should pass through bytes unchanged")
+}
+
+func tileExecutorMultiTileIdentity() async throws {
+    // 128x96 input forces multiple tiles at tileSize 64, overlap 16.
+    let input = makeGradientBuffer(width: 128, height: 96)
+    let executor = TileExecutor(tileSize: 64, overlap: 16, scale: 1)
+    let output = try await executor.execute(input: input) { tile in tile }
+
+    try require(output.width == 128 && output.height == 96, "dimensions wrong: \(output.width)x\(output.height)")
+
+    // Identity through linear feathered blend should reproduce input within
+    // Float16 quantization noise (mantissa precision ~3e-4 for unit-range values).
+    let mae = meanAbsoluteRGBDifference(input, output)
+    try require(mae < 5e-3, "multi-tile identity diverged: MAE = \(mae)")
+}
+
+func tileExecutorUpscaleDimensions() async throws {
+    // Multi-tile + scale=2 with a 2x nearest-neighbor synthetic upscaler.
+    // Verifies output dimensions and that the executor doesn't crash on the
+    // larger output buffer + per-tile coord mapping.
+    let input = makeGradientBuffer(width: 96, height: 64)
+    let executor = TileExecutor(tileSize: 48, overlap: 8, scale: 2)
+    let output = try await executor.execute(input: input) { tile in
+        // 2x nearest-neighbor: each input pixel becomes a 2x2 block.
+        let outW = tile.width * 2
+        let outH = tile.height * 2
+        let pixelCount = outW * outH
+        var data = Data(count: pixelCount * 4 * MemoryLayout<Float16>.size)
+        tile.pixels.withUnsafeBytes { srcRaw in
+            data.withUnsafeMutableBytes { dstRaw in
+                let src = srcRaw.bindMemory(to: Float16.self).baseAddress!
+                let dst = dstRaw.bindMemory(to: Float16.self).baseAddress!
+                for y in 0..<outH {
+                    for x in 0..<outW {
+                        let srcP = (y / 2) * tile.width + (x / 2)
+                        let dstP = y * outW + x
+                        for c in 0..<4 {
+                            dst[dstP * 4 + c] = src[srcP * 4 + c]
+                        }
+                    }
+                }
+            }
+        }
+        return ImageBuffer(width: outW, height: outH, format: .working, pixels: data)
+    }
+
+    try require(output.width == 192, "expected width 192, got \(output.width)")
+    try require(output.height == 128, "expected height 128, got \(output.height)")
 }

@@ -1,0 +1,2 @@
+# Models live here once converted via scripts/convert_realesrgan.py.
+# All .mlpackage and .mlmodelc files are gitignored.

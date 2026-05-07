@@ -1,5 +1,8 @@
 import Foundation
+import CoreImage
+import CoreGraphics
 import PipelineCore
+import PhotoML
 
 /// All stages currently return their input unchanged. The DAG, caching,
 /// progress reporting, and sidecar serialization are exercised end-to-end;
@@ -113,11 +116,56 @@ public struct Upscale: Stage {
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
         progress.report(0.0)
-        try await Task.sleep(nanoseconds: 1_000_000)
-        progress.report(1.0)
-        // Real impl will produce a buffer of size (input.width * scale, input.height * scale).
-        // Stub returns input unchanged so the pipeline plumbing is testable without ML.
-        return input
+        defer { progress.report(1.0) }
+
+        // Map the chosen model to a registry ID. SwinIR x2 doesn't ship; we
+        // map both Real-ESRGAN options through to RealESRGAN for now and add
+        // SwinIR to the registry once we ship that model.
+        let modelID: ModelID = switch (params.model, params.scale) {
+        case (.realESRGANx4plus, 4): .upscaleRealESRGANx4
+        case (.realESRGANx4plus, 2): .upscaleRealESRGANx2
+        case (.swinIRLarge, _):       .upscaleSwinIRLarge
+        default:                      .upscaleRealESRGANx2
+        }
+
+        let model = try await ModelManager.shared.model(for: modelID, spec: .realESRGANx2)
+
+        if let model {
+            let executor = TileExecutor(tileSize: params.tileSize, overlap: 32, scale: params.scale)
+            return try await executor.execute(input: input, progress: progress) { tile in
+                try await model.predict(tile)
+            }
+        }
+
+        // Fallback: Lanczos resize via Core Image. Same output dimensions as
+        // ML path, so the rest of the pipeline doesn't care which ran.
+        return try lanczosResize(input: input, scale: params.scale)
+    }
+
+    private func lanczosResize(input: ImageBuffer, scale: Int) throws -> ImageBuffer {
+        guard scale > 1 else { return input }
+        let inputCG = try input.makeCGImage()
+        let ciImage = CIImage(cgImage: inputCG)
+        let scaled = ciImage.applyingFilter("CILanczosScaleTransform", parameters: [
+            kCIInputScaleKey: Double(scale),
+            kCIInputAspectRatioKey: 1.0,
+        ])
+        let outW = input.width * scale
+        let outH = input.height * scale
+        let workingSpace = CGColorSpace(name: CGColorSpace.linearSRGB)!
+        let context = CIContext(options: [.workingColorSpace: workingSpace])
+        guard let outCG = context.createCGImage(
+            scaled,
+            from: CGRect(x: 0, y: 0, width: outW, height: outH),
+            format: .RGBA16,
+            colorSpace: workingSpace
+        ) else {
+            throw CoreMLModelError.predictionFailed(NSError(
+                domain: "PhotoUpscale", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Lanczos resize failed"]
+            ))
+        }
+        return try ImageBuffer.fromCGImage(outCG)
     }
 }
 

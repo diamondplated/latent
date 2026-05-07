@@ -18,13 +18,14 @@ What's working:
   - `Upscale` (Real-ESRGAN x4plus / SwinIR-L)
   - `Sharpen` (classical unsharp mask)
 - ✅ `PhotoIO` library — `ImageReader` / `ImageWriter` with EXIF round-trip, orientation baking (canonical-up pixels for the pipeline), color-space awareness (sRGB / Display P3 / Adobe RGB / ProPhoto), `preserveMetadata: false` for privacy exports
-- ✅ `pv-pipeline` CLI — 10 self-verification scenarios (cache, bypass, sidecar, LRU, JPEG round-trip, orientation baking, privacy export)
+- ✅ `PhotoML` library — `TileExecutor` (tile + feathered seam blending for arbitrary-resolution images), `CoreMLImageModel` (image-to-image inference with NCHW/NHWC, FP32/FP16, RGB/BGR, configurable input range), `ModelRegistry` + `ModelManager` (lazy-load with negative caching)
+- ✅ `Upscale.process()` is real: uses Real-ESRGAN x2 model if `Resources/Models/upscale-realesrgan-x2.mlpackage` is present, falls back to Lanczos resize otherwise — output dimensions are consistent regardless
+- ✅ `pv-pipeline` CLI — 13 self-verification scenarios
 
 What's stubbed:
 
-- 🚧 Stage bodies return input unchanged. Plumbing is exercised end-to-end; ML is the next milestone.
-- 🚧 No CoreML model loading, no tile-based inference, no face detection
-- 🚧 No CVPixelBuffer-backed `ImageBuffer` initializers (deferred until CoreML wiring)
+- 🚧 Other stages (`ArtifactRemoval`, `Denoise`, `FaceRestore`, `Sharpen`) still return input unchanged. They use the same `Stage` protocol, so wiring each to a CoreML model is mechanical: convert the model, point the registry at it, plug `ModelManager.shared.model(for:)` into `process()`.
+- 🚧 No face detection (Apple Vision integration for `FaceRestore`)
 - 🚧 No SwiftUI app target (this is a Swift Package; the app target is added in milestone 4)
 
 ## Build & verify
@@ -50,6 +51,9 @@ photo-viewer pipeline runner / verifier
   PASS  image I/O round-trips a JPEG through reader+writer
   PASS  reader bakes EXIF orientation into pixels (axes swap for orientation 6)
   PASS  writer with preserveMetadata=false strips EXIF
+  PASS  TileExecutor single-tile fast path is exact identity
+  PASS  TileExecutor multi-tile identity reproduces input within Float16 tolerance
+  PASS  TileExecutor 2x upscale produces correct output dimensions
 
 All checks passed.
 ```
@@ -71,10 +75,16 @@ Until then, the `pv-pipeline` CLI exercises the same scenarios with `assert()` s
 photo-viewer/
 ├── Package.swift
 ├── Sources/
-│   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage bridge
-│   ├── EnhancementStages/     # The 5 stage implementations (currently identity-function stubs)
+│   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage/CVPixelBuffer bridges
+│   ├── EnhancementStages/     # The 5 stages; Upscale is wired to CoreML, others are stubs
 │   ├── PhotoIO/               # ImageReader / ImageWriter / ImageMetadata
+│   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager
 │   └── PipelineCLI/           # `pv-pipeline` runner + self-verifier
+├── Resources/
+│   └── Models/                # .mlpackage files land here (gitignored)
+├── scripts/
+│   ├── convert_realesrgan.py  # PyTorch → CoreML conversion for Real-ESRGAN x2
+│   └── requirements.txt       # Python deps for the conversion script
 └── Tests/
     └── PipelineCoreTests/     # XCTest target (needs Xcode)
 ```
@@ -100,7 +110,7 @@ In order of dependency:
 
 1. ~~**Image I/O module**~~ — done. CGImageSource/CGImageDestination based reader and writer, EXIF preserved with orientation baking. CVPixelBuffer-backed `ImageBuffer` deferred until the CoreML wiring needs it.
 
-2. **First real model: Real-ESRGAN x2** (2-3 weeks) — convert the model with `coremltools`, ship as `.mlpackage` resource (lazy-downloaded), wire into `Upscale.process()` with tile-based execution + feathered seam blending.
+2. ~~**First real model: Real-ESRGAN x2**~~ — Swift side done (TileExecutor + CoreML wrapper + Upscale wiring + Lanczos fallback). Run `python3 scripts/convert_realesrgan.py` to produce the `.mlpackage` and the model becomes active.
 
 3. **Remaining 4 models** (3-4 weeks) — FBCNN, NAFNet, GFPGAN, OpenCLIP. GFPGAN needs face detection (Apple Vision framework) + alpha-blend composition.
 
