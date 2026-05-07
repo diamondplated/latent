@@ -33,7 +33,7 @@ struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
             Text("Open a folder of photos to begin")
                 .font(.title2)
-            Text("photo-viewer browses folders directly — no library import.")
+            Text("Latent browses folders directly — no library import.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button("Open Folder…") { onOpen() }

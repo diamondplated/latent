@@ -10,7 +10,7 @@ import SwiftUI
 @main
 struct PhotoViewerApp: App {
     var body: some Scene {
-        WindowGroup("photo-viewer") {
+        WindowGroup("Latent") {
             ContentView()
                 .frame(minWidth: 800, minHeight: 600)
         }
