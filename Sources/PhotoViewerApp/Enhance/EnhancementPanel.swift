@@ -103,10 +103,15 @@ struct EnhancementPanel: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Show original", isOn: Binding(
-                get: { state.showingOriginal },
-                set: { state.showingOriginal = $0 }
-            ))
+            // Compare-mode picker: enhanced / original / side-by-side. Hold
+            // B at any time to flash the original on top of any of these.
+            Picker("View", selection: $state.compareMode) {
+                ForEach(CompareMode.allCases) { mode in
+                    Label(mode.label, systemImage: mode.symbol).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
             HStack(spacing: 8) {
                 Button {

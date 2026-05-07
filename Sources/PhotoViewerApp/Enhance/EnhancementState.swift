@@ -53,9 +53,25 @@ final class EnhancementState {
     /// EXIF/color-space round-trips correctly.
     private(set) var originalMetadata: ImageMetadata? = nil
 
-    /// User toggle for the comparison view: when true, DetailView shows the
-    /// pre-pipeline image even if an enhanced one is available.
-    var showingOriginal: Bool = false
+    /// User-selected comparison mode. `displayMode` adds the transient blink
+    /// override on top.
+    var compareMode: CompareMode = .enhanced
+    /// True while the user holds the blink key (B). Forces the original view
+    /// momentarily; on release falls back to `compareMode`.
+    var blinking: Bool = false
+
+    /// What DetailView should actually render right now. Combines compareMode
+    /// with the transient blink state.
+    var displayMode: CompareMode {
+        blinking ? .original : compareMode
+    }
+
+    /// Backward-compat for the existing badge / dimensions code in DetailView.
+    /// Tracks whatever's effectively rendering (including transient blink).
+    var showingOriginal: Bool {
+        displayMode == .original
+    }
+
     /// True while the current pipeline task is running.
     private(set) var isProcessing: Bool = false
     /// Last error the pipeline or I/O surfaced; nil if none.
@@ -242,6 +258,31 @@ final class EnhancementState {
                 enabled: sharpenEnabled
             ),
         ]
+    }
+}
+
+// MARK: - Compare mode
+
+/// What DetailView should display when comparing original vs enhanced.
+enum CompareMode: String, CaseIterable, Sendable, Identifiable {
+    case enhanced
+    case original
+    case sideBySide
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .enhanced:   "Enhanced"
+        case .original:   "Original"
+        case .sideBySide: "Side-by-side"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .enhanced:   "wand.and.stars"
+        case .original:   "photo"
+        case .sideBySide: "rectangle.split.2x1"
+        }
     }
 }
 
