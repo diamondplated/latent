@@ -21,7 +21,16 @@ final class RecentFolders {
 
     init() {
         load()
-        refreshExistence()
+        // Defer the existence check off the main actor — it's a stat-per-
+        // entry loop that we don't want blocking app launch. The list
+        // renders immediately with everything assumed-fresh, and the
+        // `stale` set populates a beat later when the background pass
+        // returns. Worst case: a user clicks a row 10ms before we know
+        // it's stale, and AppState's loadFolder surfaces a clean error.
+        Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
+            await self.refreshExistence()
+        }
     }
 
     /// Push a freshly-opened folder to the front of the list. Idempotent
@@ -34,7 +43,10 @@ final class RecentFolders {
             entries = Array(entries.prefix(maxEntries))
         }
         save()
-        refreshExistence()
+        // Pushed entry is by definition fresh (we just opened it), so drop
+        // it from `stale` if it was there. Skip the full re-scan — it'll
+        // happen lazily next time the empty state shows.
+        stale.remove(canonical)
     }
 
     /// Drop a single entry. Used by the X button on each row.
@@ -50,16 +62,22 @@ final class RecentFolders {
         save()
     }
 
-    /// Re-stat each entry on disk; flag any whose folder is gone. Cheap (one
-    /// stat per entry) and only runs when the empty-state surface is visible.
-    func refreshExistence() {
-        var missing = Set<URL>()
-        let fm = FileManager.default
-        for url in entries {
-            var isDir: ObjCBool = false
-            let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
-            if !exists || !isDir.boolValue { missing.insert(url) }
-        }
+    /// Re-stat each entry on disk; flag any whose folder is gone. Run off
+    /// the main actor so the iteration over recents doesn't block. Results
+    /// are applied back on main when done, which @Observable picks up and
+    /// propagates to the view.
+    func refreshExistence() async {
+        let urls = entries
+        let missing = await Task.detached(priority: .utility) {
+            var found = Set<URL>()
+            let fm = FileManager.default
+            for url in urls {
+                var isDir: ObjCBool = false
+                let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
+                if !exists || !isDir.boolValue { found.insert(url) }
+            }
+            return found
+        }.value
         stale = missing
     }
 
