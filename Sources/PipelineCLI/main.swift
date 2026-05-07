@@ -36,6 +36,7 @@ struct PipelineCLI {
         failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
         failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
         failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
+        failures += await runVerification("CLIPBPETokenizer init from minimal merges file produces 77-token output with SOS/EOS", check: tokenizerSmokeTest)
 
         print()
         if failures == 0 {
@@ -482,6 +483,50 @@ func embeddingIndexRoundTrip() async throws {
     try require(got?.fileSize == 12345, "fileSize lost in roundtrip")
     try require(abs((got?.embedding.values[0] ?? 0) - entry.embedding.values[0]) < 1e-5,
                 "embedding values changed in roundtrip")
+}
+
+// MARK: - Tokenizer verifications
+
+func tokenizerSmokeTest() async throws {
+    // Write a minimal merges file (header + a handful of generic merges) to a
+    // temp path, build a tokenizer from it, encode a string, validate the
+    // output structure. Real tokenization correctness against CLIP needs the
+    // ~48,894-merge vocab from convert_openclip.py.
+    let tempFile = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("clip-merges-\(UUID().uuidString).txt")
+    let merges = """
+    #version: 0.2
+    t h
+    th e</w>
+    a n
+    an d</w>
+    o f</w>
+    """
+    try merges.write(to: tempFile, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tempFile) }
+
+    let tokenizer = try CLIPBPETokenizer(mergesFileURL: tempFile)
+
+    // Vocab: 256 byte chars + 256 byte+</w> + 5 merges + 2 specials = 519
+    try require(tokenizer.vocabSize == 519, "expected vocab size 519, got \(tokenizer.vocabSize)")
+    try require(tokenizer.startTokenID == 517, "SOS should be 517, got \(tokenizer.startTokenID)")
+    try require(tokenizer.endTokenID == 518, "EOS should be 518, got \(tokenizer.endTokenID)")
+
+    let ids = try tokenizer.encode("the and of")
+    try require(ids.count == 77, "expected 77 tokens, got \(ids.count)")
+    try require(ids[0] == tokenizer.startTokenID, "first token should be SOS, got \(ids[0])")
+
+    // The EOS sits after real tokens; the rest is padding (0).
+    let firstZero = ids.firstIndex(of: 0) ?? 77
+    let eosIdx = firstZero - 1
+    try require(eosIdx > 0 && ids[eosIdx] == tokenizer.endTokenID,
+                "EOS should be at index \(eosIdx), got \(ids[eosIdx])")
+
+    // All other content tokens between SOS and EOS must be in vocab range.
+    for i in 1..<eosIdx {
+        try require(ids[i] >= 0 && ids[i] < tokenizer.vocabSize,
+                    "token \(ids[i]) at index \(i) out of vocab range")
+    }
 }
 
 func faceRestoreNoFaces() async throws {

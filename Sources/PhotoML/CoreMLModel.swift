@@ -171,15 +171,21 @@ public actor CoreMLImageModel {
         public var totalCount: Int { values.count }
     }
 
-    /// Run inference, returning the output as a flat `[Float]` plus shape.
-    /// Use for models whose output isn't image-shaped — embedding encoders,
-    /// classifiers, etc.
+    /// Run inference with an `ImageBuffer` input, returning a raw tensor output.
+    /// Use for image-input models whose output isn't image-shaped — embedding
+    /// encoders, classifiers, etc.
     public func predictTensor(_ input: ImageBuffer) throws -> TensorOutput {
         precondition(input.format == .working, "predict requires working format")
-
         let mlInput = try makeMLMultiArray(from: input)
         let provider = try MLDictionaryFeatureProvider(dictionary: [spec.inputName: mlInput])
+        return try predictRaw(provider: provider, outputName: spec.outputName)
+    }
 
+    /// Run inference with a caller-built feature provider, returning raw tensor
+    /// output. Use for models whose input shape doesn't match the
+    /// `ImageBuffer → NCHW image` flow — e.g., the CLIP text encoder takes
+    /// `[1, 77]` int32 tokens. Bypasses `TensorSpec`'s image-conversion path.
+    public func predictRaw(provider: MLFeatureProvider, outputName: String) throws -> TensorOutput {
         let output: MLFeatureProvider
         do {
             output = try model.prediction(from: provider)
@@ -187,10 +193,14 @@ public actor CoreMLImageModel {
             throw CoreMLModelError.predictionFailed(error)
         }
 
-        guard let outputArray = output.featureValue(for: spec.outputName)?.multiArrayValue else {
-            throw CoreMLModelError.unexpectedOutputType("missing or non-array output for \(spec.outputName)")
+        guard let outputArray = output.featureValue(for: outputName)?.multiArrayValue else {
+            throw CoreMLModelError.unexpectedOutputType("missing or non-array output for \(outputName)")
         }
 
+        return try Self.extractTensor(from: outputArray)
+    }
+
+    private static func extractTensor(from outputArray: MLMultiArray) throws -> TensorOutput {
         let shape = outputArray.shape.map { $0.intValue }
         let total = shape.reduce(1, *)
         var values = [Float](repeating: 0, count: total)
@@ -210,8 +220,6 @@ public actor CoreMLImageModel {
             let typed = ptr.assumingMemoryBound(to: Int32.self)
             for i in 0..<total { values[i] = Float(typed[i]) }
         case .int8:
-            // Quantized output. We're not currently dequantizing scale/zeropoint;
-            // raw int8 → Float is not meaningful for embeddings or images.
             throw CoreMLModelError.unexpectedOutputType("int8 (quantized) output not supported yet — convert model with float16/float32 precision")
         @unknown default:
             throw CoreMLModelError.unexpectedOutputType("unsupported MLMultiArrayDataType: \(outputArray.dataType.rawValue)")

@@ -32,8 +32,10 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = REPO_ROOT / "Resources" / "Models"
+TOKENIZER_DIR = REPO_ROOT / "Resources" / "Tokenizer"
 IMAGE_OUT = OUTPUT_DIR / "openclip-vitb32-image.mlpackage"
 TEXT_OUT = OUTPUT_DIR / "openclip-vitb32-text.mlpackage"
+MERGES_OUT = TOKENIZER_DIR / "clip-bpe-merges.txt"
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
@@ -127,10 +129,39 @@ def convert_text(model_module):
     return mlmodel
 
 
+def export_merges() -> None:
+    """Write the BPE merges file the Swift tokenizer expects.
+
+    Source: open_clip's bundled bpe_simple_vocab_16e6.txt.gz, decompressed
+    to plain text. The Swift tokenizer caps at openai/CLIP's 48,894 merges.
+    """
+    if MERGES_OUT.exists():
+        print(f"merges already present: {MERGES_OUT}")
+        return
+
+    import gzip
+    import open_clip
+
+    # open_clip ships the same merges file as openai/CLIP at simple_tokenizer/bpe_simple_vocab_16e6.txt.gz
+    pkg_dir = Path(open_clip.__file__).parent
+    candidate = pkg_dir / "bpe_simple_vocab_16e6.txt.gz"
+    if not candidate.exists():
+        # Newer open_clip may relocate the file.
+        for p in pkg_dir.rglob("bpe_simple_vocab_16e6.txt.gz"):
+            candidate = p
+            break
+    with gzip.open(candidate, "rt", encoding="utf-8") as f:
+        text = f.read()
+
+    TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
+    MERGES_OUT.write_text(text, encoding="utf-8")
+    print(f"saved {MERGES_OUT}")
+
+
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    if IMAGE_OUT.exists() and TEXT_OUT.exists():
-        print("both encoders already exist — delete to re-convert")
+    if IMAGE_OUT.exists() and TEXT_OUT.exists() and MERGES_OUT.exists():
+        print("encoders + merges already exist — delete to re-convert")
         return 0
 
     try:
@@ -155,6 +186,8 @@ def main() -> int:
             mlmodel = convert_text(text_module)
             mlmodel.save(str(TEXT_OUT))
             print(f"saved {TEXT_OUT}")
+
+        export_merges()
 
         return 0
     except ModuleNotFoundError as e:

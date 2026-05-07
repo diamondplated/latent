@@ -7,14 +7,15 @@ public enum SearchError: Error, CustomStringConvertible {
     case folderNotADirectory(URL)
     case readError(URL, any Error)
     case encoderError(any Error)
-    case textNotImplemented
+    case textNotAvailable
 
     public var description: String {
         switch self {
-        case .folderNotADirectory(let url): "Not a directory: \(url.path)"
-        case .readError(let url, let err): "Failed to read \(url.lastPathComponent): \(err)"
-        case .encoderError(let err): "CLIP encoder failed: \(err)"
-        case .textNotImplemented: "Text-query search needs the BPE tokenizer (not yet shipped)"
+        case .folderNotADirectory(let url): return "Not a directory: \(url.path)"
+        case .readError(let url, let err): return "Failed to read \(url.lastPathComponent): \(err)"
+        case .encoderError(let err): return "CLIP encoder failed: \(err)"
+        case .textNotAvailable:
+            return "Text-query search needs the OpenCLIP text encoder + BPE merges file. Run scripts/convert_openclip.py."
         }
     }
 }
@@ -130,9 +131,11 @@ public actor SearchEngine {
         return scored.map { SearchResult(entry: $0.0, similarity: $0.1) }
     }
 
-    /// Natural-language query. **Currently throws** — needs the BPE tokenizer.
+    /// Natural-language query via OpenCLIP text encoder + BPE tokenizer.
+    /// Throws if either the text encoder model or the tokenizer vocab file
+    /// isn't available (`scripts/convert_openclip.py` produces both).
     public func search(text: String, k: Int = 20) async throws -> [SearchResult] {
-        guard await textEncoder.isAvailable else { throw SearchError.textNotImplemented }
+        guard await textEncoder.isAvailable else { throw SearchError.textNotAvailable }
         let q: EmbeddingVector
         do {
             q = try await textEncoder.encode(text)
