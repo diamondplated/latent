@@ -99,6 +99,27 @@ final class AppState {
         selectedIndex = max((selectedIndex ?? imageURLs.count) - 1, 0)
     }
 
+    func selectFirst() {
+        selectedIndex = imageURLs.isEmpty ? nil : 0
+    }
+
+    func selectLast() {
+        selectedIndex = imageURLs.isEmpty ? nil : imageURLs.count - 1
+    }
+
+    /// Jump to a specific URL (no-op if it's not in the current folder).
+    /// Used by vim mark-jump and map-cluster selection.
+    func select(url: URL) {
+        if let i = imageURLs.firstIndex(of: url) {
+            selectedIndex = i
+        }
+    }
+
+    var currentURL: URL? {
+        guard let i = selectedIndex, i < imageURLs.count else { return nil }
+        return imageURLs[i]
+    }
+
     func stopWatching() {
         fileWatcher?.cancel()
         fileWatcher = nil

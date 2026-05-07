@@ -7,6 +7,8 @@ import EnhancementStages
 import PhotoIO
 import PhotoML
 import PhotoSearch
+import PhotoViewerCore
+import PhotoGeo
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -37,6 +39,27 @@ struct PipelineCLI {
         failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
         failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
         failures += await runVerification("CLIPBPETokenizer init from minimal merges file produces 77-token output with SOS/EOS", check: tokenizerSmokeTest)
+        // VimKeymap is @MainActor; hop via a Task so the closure handed to
+        // runVerification stays non-isolated.
+        failures += await runVerification("VimKeymap: j returns .next from index 0") {
+            try await Task { @MainActor in try await vimJourneyNextFromZero() }.value
+        }
+        failures += await runVerification("VimKeymap: gg chord returns .none then .first") {
+            try await Task { @MainActor in try await vimGGTwoChord() }.value
+        }
+        failures += await runVerification("VimKeymap: m a sets mark, ' a jumps to it") {
+            try await Task { @MainActor in try await vimMarkRoundtrip() }.value
+        }
+        failures += await runVerification("VimKeymap: digit key sets color label") {
+            try await Task { @MainActor in try await vimDigitSetsColorLabel() }.value
+        }
+        failures += await runVerification("VimKeymap: shift+P toggles pick") {
+            try await Task { @MainActor in try await vimShiftPTogglesPick() }.value
+        }
+        failures += await runVerification("VimKeymap: save/load roundtrip preserves marks/labels/picks") {
+            try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
+        }
+        failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
 
         print()
         if failures == 0 {
@@ -50,7 +73,7 @@ struct PipelineCLI {
 
 // MARK: - Helpers
 
-func runVerification(_ name: String, check: () async throws -> Void) async -> Int {
+func runVerification(_ name: String, check: sending () async throws -> Void) async -> Int {
     do {
         try await check()
         print("  PASS  \(name)")
