@@ -63,10 +63,28 @@ final class NavigationKeyMonitor {
         // through them anyway), but better not to mess with it.
         guard state.folder != nil else { return event }
 
-        // Modifier-laden arrow keys (cmd-left for window-back, etc.) are not
-        // ours to claim.
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .isDisjoint(with: [.command, .control, .option]) == false {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let onlyCmd = (mods == .command)
+
+        // Cmd-shortcuts we own. Handled BEFORE the general cmd-bail below
+        // so SwiftUI's keyboardShortcut wiring doesn't have to fight the
+        // window-level monitor for these particular keys.
+        if onlyCmd {
+            switch event.keyCode {
+            case 6:  // ⌘Z — undo trash
+                state.undoTrash()
+                return nil
+            case 0:  // ⌘A — select all photos
+                state.selectAllPhotos()
+                return nil
+            default:
+                break
+            }
+        }
+
+        // Other modifier-laden keys (cmd-left for window-back, opt-arrows
+        // for word-jump, etc.) are not ours to claim.
+        if !mods.isDisjoint(with: [.command, .control, .option]) {
             return event
         }
 
@@ -83,6 +101,14 @@ final class NavigationKeyMonitor {
             state.trashCurrentImage()
             return nil
         case 53: // escape
+            // Multi-selection takes the first Esc. Falls through to the
+            // existing double-tap close-folder logic when no multi is
+            // active, so users who haven't built up a selection still
+            // get the standard Esc behavior.
+            if !state.multiSelection.isEmpty {
+                state.clearMultiSelection()
+                return nil
+            }
             return handleEscape(state: state, event: event)
         default:
             return event
