@@ -85,7 +85,12 @@ final class AppState {
     ///   pins this folder as the folder-tree's root so the tree shows from
     ///   here. When false (used by the folder-tree click handler itself),
     ///   only the active folder changes — the tree stays anchored.
-    func loadFolder(_ url: URL, setAsAnchor: Bool = true) async {
+    /// - Parameter recursive: When true (the default — used by the Open
+    ///   dialog and friends), bulk-scan everything under the folder.
+    ///   When false (used by the folder-tree drill path), scan only this
+    ///   folder's direct contents — the tree IS the navigation, recursing
+    ///   into subfolders would defeat the point.
+    func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = true) async {
         selectedIndex = nil
         lastError = nil
         defer { loadPhase = nil }
@@ -134,7 +139,7 @@ final class AppState {
         // by O(batches) on huge folders). Live count comes from loadPhase
         // alone; imageURLs is set once at the end.
         let pathBase = scanRoot.path
-        let stream = Self.scanFolderStream(scanRoot)
+        let stream = Self.scanFolderStream(scanRoot, recursive: recursive)
         let folderName = scanRoot.lastPathComponent
         let collected: [URL] = await Task.detached(priority: .userInitiated) { [weak self] in
             var found: [URL] = []
@@ -171,14 +176,34 @@ final class AppState {
     /// Recursively walk a folder, yielding batches of image URLs as they're
     /// discovered. Streaming so `loadFolder` can show "Found X photos…"
     /// during a multi-second scan instead of looking frozen.
-    private static func scanFolderStream(_ root: URL) -> AsyncStream<[URL]> {
+    private static func scanFolderStream(_ root: URL, recursive: Bool) -> AsyncStream<[URL]> {
         let imageExtensions = AppState.imageExtensions
-        // Local-let the batch size so the detached task captures a value
-        // (not a MainActor-isolated static).
         let batchSize = 64
         return AsyncStream { continuation in
             Task.detached(priority: .userInitiated) {
                 let fm = FileManager.default
+
+                // For non-recursive scans (folder-tree drill path), use
+                // contentsOfDirectory and yield in one shot. Cheap, finite,
+                // doesn't fight with the recursive enumerator's depth-first
+                // walk.
+                if !recursive {
+                    let items = (try? fm.contentsOfDirectory(
+                        at: root,
+                        includingPropertiesForKeys: [.isRegularFileKey],
+                        options: [.skipsHiddenFiles]
+                    )) ?? []
+                    let photos = items.filter { url in
+                        let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                        return isFile && imageExtensions.contains(url.pathExtension.lowercased())
+                    }
+                    if !photos.isEmpty { continuation.yield(photos) }
+                    continuation.finish()
+                    return
+                }
+
+                // Recursive path: streaming enumerator + batch yields so the
+                // loader can show "Found X photos…" tick up live.
                 guard let enumerator = fm.enumerator(
                     at: root,
                     includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
@@ -188,8 +213,6 @@ final class AppState {
                     return
                 }
                 var batch: [URL] = []
-                // nextObject() works in async/detached contexts; the Sequence
-                // form (`for-in`) is marked unavailable.
                 while let next = enumerator.nextObject() {
                     guard let url = next as? URL else { continue }
                     if url.lastPathComponent == "__MACOSX" {
@@ -216,7 +239,9 @@ final class AppState {
     /// scan + replace is cheaper than re-streaming.
     private static func scanFolderRecursive(_ root: URL) async -> [URL] {
         var all: [URL] = []
-        for await batch in scanFolderStream(root) { all.append(contentsOf: batch) }
+        for await batch in scanFolderStream(root, recursive: true) {
+            all.append(contentsOf: batch)
+        }
         let basePath = root.path
         return all.sorted { lhs, rhs in
             let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path

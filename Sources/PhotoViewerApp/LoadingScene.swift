@@ -104,6 +104,12 @@ struct LoadingScene: View {
     /// Live status: "X photos found" while scanning; "Decompressing…" while
     /// extracting (we don't get incremental progress out of unzip without
     /// piping its verbose output).
+    ///
+    /// Previously used `.contentTransition(.numericText)` to roll the digits
+    /// — but on rapid batched updates from the streaming scan (every 64
+    /// photos), back-to-back transitions overlapped and rendered as
+    /// scrambled glyphs ("1b29j7j"). Just snap to the new value; clear
+    /// monospaced digits beat fancy animation.
     private var statusRow: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
@@ -115,8 +121,7 @@ struct LoadingScene: View {
                     let label = n == 0 ? "Looking for photos…"
                                        : "\(n) photo\(n == 1 ? "" : "s") found"
                     Text(label)
-                        .contentTransition(.numericText(countsDown: false))
-                        .animation(.snappy, value: n)
+                        .monospacedDigit()
                 }
             }
             .font(.system(.body, design: .rounded))
