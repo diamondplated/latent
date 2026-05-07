@@ -62,6 +62,12 @@ final class AppState {
     /// the previous one finishes. Whatever was found before cancel is still
     /// committed — partial results are usually what the user wanted.
     private var scanTask: Task<Void, Never>? = nil
+    /// Bumped every time disk state diverges from the folder tree's cached
+    /// view — currently after a folder trash. The tree subscribes via
+    /// .onChange and re-stats nodes whose children we know about. Better
+    /// than a global notification because it stays inside @Observable
+    /// land and SwiftUI handles propagation for us.
+    var folderTreeChangeTick: Int = 0
 
     /// Everything Latent will pick up during a folder scan. Static images,
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
@@ -335,6 +341,57 @@ final class AppState {
     func stopWatching() {
         fileWatcher?.cancel()
         fileWatcher = nil
+    }
+
+    /// Move an image to the user's Trash. Reversible — the file ends up in
+    /// ~/.Trash and can be pulled back from Finder. Updates `imageURLs` and
+    /// `selectedIndex` optimistically so the UI advances instantly; the
+    /// file watcher will reach the same state moments later.
+    func trashImage(at url: URL) {
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            lastError = "Couldn't move \(url.lastPathComponent) to Trash: \(error.localizedDescription)"
+            return
+        }
+        guard let i = imageURLs.firstIndex(of: url) else { return }
+        imageURLs.remove(at: i)
+        // Keep selection on a sensible neighbor so the user can keep
+        // surfing without losing their place. If we trashed the current
+        // photo, advance to what was next (or last, if we trashed the
+        // tail). If we trashed something earlier in the list, shift the
+        // selection back by one to point at the same photo.
+        if let sel = selectedIndex {
+            if imageURLs.isEmpty {
+                selectedIndex = nil
+            } else if sel == i {
+                selectedIndex = min(i, imageURLs.count - 1)
+            } else if sel > i {
+                selectedIndex = sel - 1
+            }
+        }
+    }
+
+    /// Trash the currently-selected image. Bound to Backspace and the
+    /// thumbnail context menu's "Move to Trash".
+    func trashCurrentImage() {
+        guard let i = selectedIndex, i < imageURLs.count else { return }
+        trashImage(at: imageURLs[i])
+    }
+
+    /// Move a whole folder to the Trash. If it's the active folder, close
+    /// the album. If it's listed in recents, drop it. Bumps the tree
+    /// change tick so the FolderTreeView re-stats and removes the row.
+    func trashFolder(at url: URL) {
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            lastError = "Couldn't move folder to Trash: \(error.localizedDescription)"
+            return
+        }
+        if url == folder { closeFolder() }
+        recents.remove(url)
+        folderTreeChangeTick &+= 1
     }
 
     /// Close the current album: drop selection + URL list, swap back to the

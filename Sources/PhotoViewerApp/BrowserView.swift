@@ -241,7 +241,8 @@ struct BrowserView: View {
                             colorLabel: vimKeymap.colorLabel(for: url),
                             isPicked: vimKeymap.isPicked(url),
                             isRejected: vimKeymap.isRejected(url),
-                            size: thumbnailSize
+                            size: thumbnailSize,
+                            onTrash: { state.trashImage(at: url) }
                         )
                         .id(idx)
                         .onTapGesture {
@@ -354,7 +355,13 @@ struct ThumbnailCell: View {
     let isPicked: Bool
     let isRejected: Bool
     let size: CGFloat
+    /// One-click trash. Called from the hover-revealed X and the right-
+    /// click context menu — kept as a closure so the cell doesn't need
+    /// AppState injected through every preview path.
+    let onTrash: () -> Void
+
     @State private var image: CGImage? = nil
+    @State private var hovered: Bool = false
 
     var body: some View {
         ZStack {
@@ -392,7 +399,43 @@ struct ThumbnailCell: View {
                     .padding(4)
             }
         }
+        // Hover-revealed trash button. One click moves to Trash (not
+        // permanent) so a misclick is recoverable from Finder. Kept in
+        // the bottomTrailing corner — topLeading/topTrailing are taken
+        // by the color label and pick/reject markers.
+        .overlay(alignment: .bottomTrailing) {
+            if hovered {
+                Button {
+                    onTrash()
+                } label: {
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(Color.red.opacity(0.9), in: Circle())
+                        .overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .padding(6)
+                .help("Move to Trash")
+                .transition(.opacity)
+            }
+        }
         .opacity(isRejected ? 0.5 : 1.0)
+        .onHover { hovered = $0 }
+        .contextMenu {
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("Reveal in Finder", systemImage: "magnifyingglass")
+            }
+            Divider()
+            Button(role: .destructive) {
+                onTrash()
+            } label: {
+                Label("Move to Trash", systemImage: "trash")
+            }
+        }
         .task {
             image = await ThumbnailLoader.shared.thumbnail(for: url)
         }
