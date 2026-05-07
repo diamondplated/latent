@@ -85,53 +85,82 @@ final class AppState {
 
         folder = scanRoot
         loadStatus = "Scanning \(scanRoot.lastPathComponent)…"
-        let urls = await Self.scanFolderRecursive(scanRoot)
-        imageURLs = urls
-        if !urls.isEmpty { selectedIndex = 0 }
+        // Drain the streaming scan, appending batches as they arrive so the
+        // UI fills in live. For huge folders this is the difference between
+        // "is this stuck?" and "X photos found, scanning…"
+        imageURLs = []
+        for await batch in Self.scanFolderStream(scanRoot) {
+            imageURLs.append(contentsOf: batch)
+            loadStatus = "Found \(imageURLs.count) photo\(imageURLs.count == 1 ? "" : "s")…"
+        }
+        // Final sort once the walk is done — sorting per-batch would be
+        // O(N log N) per batch and force the LazyVGrid to keep diffing.
+        let basePath = scanRoot.path
+        imageURLs.sort { lhs, rhs in
+            let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
+            let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
+            return l.localizedStandardCompare(r) == .orderedAscending
+        }
+        if !imageURLs.isEmpty { selectedIndex = 0 }
 
         startWatching(scanRoot)
     }
 
-    /// Recursively walk a folder, returning every image URL. Hops to a
-    /// detached background task so a folder with thousands of files doesn't
-    /// freeze the UI thread on `enumerator(at:)`.
-    private static func scanFolderRecursive(_ root: URL) async -> [URL] {
+    /// Recursively walk a folder, yielding batches of image URLs as they're
+    /// discovered. Streaming so `loadFolder` can show "Found X photos…"
+    /// during a multi-second scan instead of looking frozen.
+    private static func scanFolderStream(_ root: URL) -> AsyncStream<[URL]> {
         let imageExtensions = AppState.imageExtensions
-        return await Task.detached(priority: .userInitiated) { () -> [URL] in
-            let fm = FileManager.default
-            // Hidden subfolders + macOS metadata dirs (e.g., `__MACOSX` from
-            // zip archives created on macOS) are skipped: nothing useful and
-            // would otherwise show up as duplicates of every photo.
-            guard let enumerator = fm.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else {
-                return []
-            }
-            var found: [URL] = []
-            // Use nextObject() rather than `for-in`; the Sequence-iterator
-            // form is marked unavailable from async contexts under Swift 6.
-            while let next = enumerator.nextObject() {
-                guard let url = next as? URL else { continue }
-                if url.lastPathComponent == "__MACOSX" {
-                    enumerator.skipDescendants()
-                    continue
+        // Local-let the batch size so the detached task captures a value
+        // (not a MainActor-isolated static).
+        let batchSize = 64
+        return AsyncStream { continuation in
+            Task.detached(priority: .userInitiated) {
+                let fm = FileManager.default
+                guard let enumerator = fm.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) else {
+                    continuation.finish()
+                    return
                 }
-                let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-                guard isFile else { continue }
-                guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
-                found.append(url)
+                var batch: [URL] = []
+                // nextObject() works in async/detached contexts; the Sequence
+                // form (`for-in`) is marked unavailable.
+                while let next = enumerator.nextObject() {
+                    guard let url = next as? URL else { continue }
+                    if url.lastPathComponent == "__MACOSX" {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                    guard isFile else { continue }
+                    guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
+                    batch.append(url)
+                    if batch.count >= batchSize {
+                        continuation.yield(batch)
+                        batch = []
+                    }
+                }
+                if !batch.isEmpty { continuation.yield(batch) }
+                continuation.finish()
             }
-            // Sort by full relative-path so subfolder order is stable. Folders
-            // intermix naturally (each photo's path includes its subdir).
-            let basePath = root.path
-            return found.sorted { lhs, rhs in
-                let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
-                let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
-                return l.localizedStandardCompare(r) == .orderedAscending
-            }
-        }.value
+        }
+    }
+
+    /// Synchronous version used by the file watcher's rescan path. Kept
+    /// non-streaming because watchers fire on tiny diffs where a one-shot
+    /// scan + replace is cheaper than re-streaming.
+    private static func scanFolderRecursive(_ root: URL) async -> [URL] {
+        var all: [URL] = []
+        for await batch in scanFolderStream(root) { all.append(contentsOf: batch) }
+        let basePath = root.path
+        return all.sorted { lhs, rhs in
+            let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
+            let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
+            return l.localizedStandardCompare(r) == .orderedAscending
+        }
     }
 
     private func startWatching(_ url: URL) {

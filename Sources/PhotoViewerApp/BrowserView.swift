@@ -43,6 +43,9 @@ struct BrowserView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            ToolbarItem(placement: .primaryAction) {
+                photoCounter
+            }
         }
         // Folder switch hooks: load saved vim state, kick off GPS extraction.
         .onChange(of: state.folder) { _, newFolder in
@@ -59,9 +62,75 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var sidebar: some View {
-        switch mode {
-        case .grid:  thumbnailGrid
-        case .map:   mapView
+        ZStack {
+            switch mode {
+            case .grid:  thumbnailGrid
+            case .map:   mapView
+            }
+            // Loading overlay: covers the sidebar while a folder/archive is
+            // being processed. Sits inside the sidebar so the detail pane
+            // (with its own state) doesn't get blocked.
+            if state.isLoading {
+                loadingOverlay
+            }
+        }
+    }
+
+    /// Translucent overlay shown during folder scan / archive extraction.
+    /// Blocks input to the partially-populated grid below so the user
+    /// doesn't try to click thumbnails that are still arriving.
+    private var loadingOverlay: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                if let status = state.loadStatus {
+                    Text(status)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 240)
+                }
+                if let err = state.lastError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 280)
+                }
+            }
+        }
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.15), value: state.isLoading)
+    }
+
+    /// Toolbar counter: "i / N" when a photo is selected, "N photos" if
+    /// nothing is selected, or "Scanning…" while loading. Compact monospace
+    /// so it doesn't bounce around as numbers grow.
+    private var photoCounter: some View {
+        Group {
+            if state.isLoading {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text(state.imageURLs.isEmpty ? "Scanning…" : "\(state.imageURLs.count) so far…")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            } else if !state.imageURLs.isEmpty {
+                let total = state.imageURLs.count
+                if let i = state.selectedIndex {
+                    Text("\(i + 1) / \(total)")
+                        .font(.system(.callout, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                } else {
+                    Text("\(total) photo\(total == 1 ? "" : "s")")
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
