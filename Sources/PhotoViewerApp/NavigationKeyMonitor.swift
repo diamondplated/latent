@@ -52,7 +52,7 @@ final class NavigationKeyMonitor {
         case 123, 126: // left, up
             state.selectPrevious()
             return nil
-        case 124, 125: // right, down
+        case 124, 125, 49: // right, down, space — all advance
             state.selectNext()
             return nil
         default:

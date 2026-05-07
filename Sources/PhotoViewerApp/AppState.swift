@@ -30,6 +30,9 @@ final class AppState {
     /// Shared singleton so the empty state and any future "Open Recent" menu
     /// stay in sync.
     let recents = RecentFolders()
+    /// Whether the enhancement side panel is visible. Default false: the app
+    /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
+    var showEnhancementPanel: Bool = false
 
     /// What stage the folder/archive open is in. Used to drive the loader UI.
     enum LoadPhase: Equatable {
