@@ -10,21 +10,22 @@ This is the **architectural keystone** for the project: the pipeline DAG executo
 
 What's working:
 
-- ✅ `PipelineCore` library — `ImageBuffer`, `Stage` protocol, `Pipeline` chain executor, `IntermediateCache` (LRU, byte-bounded), `EnhanceSidecar` (`.enhance.json` round-trip)
+- ✅ `PipelineCore` library — `ImageBuffer`, `Stage` protocol, `Pipeline` chain executor, `IntermediateCache` (LRU, byte-bounded), `EnhanceSidecar` (`.enhance.json` round-trip), `ImageBuffer ↔ CGImage` bridge
 - ✅ `EnhancementStages` — the 5 stages with **real, final parameter shapes** but **identity-function bodies** (no ML inference yet)
   - `ArtifactRemoval` (FBCNN)
   - `Denoise` (NAFNet)
   - `FaceRestore` (GFPGAN)
   - `Upscale` (Real-ESRGAN x4plus / SwinIR-L)
   - `Sharpen` (classical unsharp mask)
-- ✅ `pv-pipeline` CLI — runs the full pipeline and self-verifies cold/warm cache, bypass, sidecar round-trip, LRU eviction
+- ✅ `PhotoIO` library — `ImageReader` / `ImageWriter` with EXIF round-trip, orientation baking (canonical-up pixels for the pipeline), color-space awareness (sRGB / Display P3 / Adobe RGB / ProPhoto), `preserveMetadata: false` for privacy exports
+- ✅ `pv-pipeline` CLI — 10 self-verification scenarios (cache, bypass, sidecar, LRU, JPEG round-trip, orientation baking, privacy export)
 
 What's stubbed:
 
 - 🚧 Stage bodies return input unchanged. Plumbing is exercised end-to-end; ML is the next milestone.
 - 🚧 No CoreML model loading, no tile-based inference, no face detection
-- 🚧 No image I/O (decode/encode) — `ImageBuffer.init` takes raw `Data`
-- 🚧 No SwiftUI app target (this is a Swift Package; the app target is added in milestone 2)
+- 🚧 No CVPixelBuffer-backed `ImageBuffer` initializers (deferred until CoreML wiring)
+- 🚧 No SwiftUI app target (this is a Swift Package; the app target is added in milestone 4)
 
 ## Build & verify
 
@@ -44,7 +45,11 @@ photo-viewer pipeline runner / verifier
   PASS  disabling a stage skips it; upstream stays cached
   PASS  distinct inputs occupy independent cache entries
   PASS  sidecar round-trip preserves stage parameters
+  PASS  sidecar load rejects newer schema versions
   PASS  LRU eviction drops least-recently-used entry
+  PASS  image I/O round-trips a JPEG through reader+writer
+  PASS  reader bakes EXIF orientation into pixels (axes swap for orientation 6)
+  PASS  writer with preserveMetadata=false strips EXIF
 
 All checks passed.
 ```
@@ -66,8 +71,9 @@ Until then, the `pv-pipeline` CLI exercises the same scenarios with `assert()` s
 photo-viewer/
 ├── Package.swift
 ├── Sources/
-│   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer
+│   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage bridge
 │   ├── EnhancementStages/     # The 5 stage implementations (currently identity-function stubs)
+│   ├── PhotoIO/               # ImageReader / ImageWriter / ImageMetadata
 │   └── PipelineCLI/           # `pv-pipeline` runner + self-verifier
 └── Tests/
     └── PipelineCoreTests/     # XCTest target (needs Xcode)
@@ -92,7 +98,7 @@ photo-viewer/
 
 In order of dependency:
 
-1. **Image I/O module** (1-2 weeks) — Core Image-backed decode for JPEG/HEIC/PNG/RAW; encode preserving EXIF + orientation. `ImageBuffer` gains CVPixelBuffer-backed initializers for zero-copy interop with CoreML/Metal.
+1. ~~**Image I/O module**~~ — done. CGImageSource/CGImageDestination based reader and writer, EXIF preserved with orientation baking. CVPixelBuffer-backed `ImageBuffer` deferred until the CoreML wiring needs it.
 
 2. **First real model: Real-ESRGAN x2** (2-3 weeks) — convert the model with `coremltools`, ship as `.mlpackage` resource (lazy-downloaded), wire into `Upscale.process()` with tile-based execution + feathered seam blending.
 
