@@ -51,9 +51,15 @@ final class ThumbnailLoader: ObservableObject {
 
     /// Run the decode on the bounded operation queue rather than directly
     /// on a global GCD queue — caps concurrent decodes and lets the OS
-    /// schedule fairly under load.
+    /// schedule fairly under load. Routes video URLs through the
+    /// AVAssetImageGenerator path so the grid actually shows a frame for
+    /// .mp4 / .mov etc. instead of a placeholder.
     private static func makeThumbnail(url: URL, maxDimension: Int) async -> CGImage? {
-        await withCheckedContinuation { continuation in
+        let kind = MediaTyping.detect(url)
+        if kind == .video {
+            return await VideoThumbnail.generate(url: url, maxDimension: maxDimension)
+        }
+        return await withCheckedContinuation { continuation in
             decodeQueue.addOperation {
                 let options: [CFString: Any] = [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,

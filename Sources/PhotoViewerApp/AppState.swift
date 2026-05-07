@@ -49,10 +49,11 @@ final class AppState {
     /// else (or when the app quits).
     private var extractedArchiveDir: URL?
 
-    static let imageExtensions: Set<String> = [
-        "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff",
-        "webp", "avif", "jxl", "gif", "bmp",
-    ]
+    /// Everything Latent will pick up during a folder scan. Static images,
+    /// animated images (GIF / APNG / animated HEIC etc.), and video formats
+    /// AVFoundation can take a swing at. The actual playback decision is
+    /// made later by `MediaTyping.detect` per file.
+    static var imageExtensions: Set<String> { MediaTyping.allMediaExts }
 
     /// Open a folder/archive picker; on selection, scan (recursively) and
     /// watch the folder. Archive selections are extracted to a temp dir
