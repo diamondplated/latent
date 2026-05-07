@@ -1,11 +1,14 @@
 import SwiftUI
 import AppKit
 import ImageIO
+import PipelineCore
 
 struct DetailView: View {
     let state: AppState
-    @State private var image: NSImage? = nil
-    @State private var loadingURL: URL? = nil
+    /// Owns the enhancement editor state (per-stage params, buffers, cache).
+    /// Kept at DetailView level so the panel and the image preview share one
+    /// instance and the cache survives across selection changes.
+    @State private var enhanceState = EnhancementState()
 
     var currentURL: URL? {
         guard let i = state.selectedIndex, i < state.imageURLs.count else { return nil }
@@ -13,10 +16,23 @@ struct DetailView: View {
     }
 
     var body: some View {
+        HSplitView {
+            imagePane
+                .frame(minWidth: 320)
+            EnhancementPanel(state: enhanceState)
+        }
+        .task(id: currentURL) {
+            await loadCurrent()
+        }
+    }
+
+    /// The left side: just the image (or placeholder/spinner). Picks between
+    /// the original and the pipeline output based on the panel's toggle.
+    private var imagePane: some View {
         ZStack {
             Color.black
-            if let image {
-                Image(nsImage: image)
+            if let nsImage = displayImage {
+                Image(nsImage: nsImage)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
@@ -30,9 +46,22 @@ struct DetailView: View {
         }
         .overlay(alignment: .topLeading) { infoBar }
         .overlay(alignment: .bottomTrailing) { positionBadge }
-        .task(id: currentURL) {
-            await loadCurrent()
+        .overlay(alignment: .topTrailing) { showingOriginalBadge }
+    }
+
+    /// The image to actually display. Order of preference:
+    ///   - showingOriginal=true → originalBuffer (or nothing if not loaded)
+    ///   - else → enhancedBuffer if available, else originalBuffer (so the
+    ///     user sees the source instantly while the first pipeline run is
+    ///     still working, instead of a blank frame).
+    private var displayImage: NSImage? {
+        if enhanceState.showingOriginal {
+            return enhanceState.originalBuffer?.makeNSImage()
         }
+        if let enhanced = enhanceState.enhancedBuffer {
+            return enhanced.makeNSImage()
+        }
+        return enhanceState.originalBuffer?.makeNSImage()
     }
 
     private var infoBar: some View {
@@ -69,27 +98,37 @@ struct DetailView: View {
         }
     }
 
+    /// "ORIGINAL" pill in the corner whenever the comparison toggle is on.
+    /// Without it, sliding the toggle while focused on the panel would not
+    /// have any visible cue at the image level.
+    private var showingOriginalBadge: some View {
+        Group {
+            if enhanceState.showingOriginal && enhanceState.originalBuffer != nil {
+                Text("ORIGINAL")
+                    .font(.system(.caption2, design: .monospaced).weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.yellow.opacity(0.85), in: Capsule())
+                    .foregroundStyle(.black)
+                    .padding(12)
+            }
+        }
+    }
+
+    /// Use the buffer's dimensions (which already reflect orientation baking
+    /// from the reader) so the displayed numbers match what the pipeline
+    /// actually saw, not the raw EXIF.
     private var imageDimensions: (width: Int, height: Int)? {
-        guard let image else { return nil }
-        return (Int(image.size.width), Int(image.size.height))
+        let buf = enhanceState.showingOriginal
+            ? enhanceState.originalBuffer
+            : (enhanceState.enhancedBuffer ?? enhanceState.originalBuffer)
+        guard let buf else { return nil }
+        return (buf.width, buf.height)
     }
 
     @MainActor
     private func loadCurrent() async {
-        guard let url = currentURL else {
-            image = nil
-            return
-        }
-        if loadingURL == url { return }
-        loadingURL = url
-        // Quick path: NSImage load. The full color-managed pipeline path goes
-        // through ImageReader; for display we just need pixels on screen fast.
-        let loaded = await Task.detached(priority: .userInitiated) {
-            NSImage(contentsOf: url)
-        }.value
-        // Only commit if the user hasn't moved on.
-        if loadingURL == url {
-            image = loaded
-        }
+        guard let url = currentURL else { return }
+        await enhanceState.loadInput(url: url)
     }
 }
