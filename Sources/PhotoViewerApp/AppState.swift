@@ -33,6 +33,15 @@ final class AppState {
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
     var showEnhancementPanel: Bool = false
+    /// Whether the folder-tree sidebar (far-left pane) is visible. Default
+    /// false to keep the layout simple for new users; toolbar button toggles.
+    var showFolderTree: Bool = false
+    /// Root the folder tree displays from. Set to whatever the user picked
+    /// in the Open dialog or Recents — clicking a subfolder in the tree
+    /// updates `folder` but leaves anchor pinned, so the tree stays put as
+    /// the user drills around. Distinct from `folder`, which is the active
+    /// (photo-list) folder.
+    var anchorFolder: URL? = nil
 
     /// What stage the folder/archive open is in. Used to drive the loader UI.
     enum LoadPhase: Equatable {
@@ -70,10 +79,17 @@ final class AppState {
         Task { await loadFolder(url) }
     }
 
-    func loadFolder(_ url: URL) async {
+    /// Open a folder.
+    /// - Parameter setAsAnchor: When true (the default — used by the Open
+    ///   dialog, Recents, drag-drop, and the right-click → Open With path),
+    ///   pins this folder as the folder-tree's root so the tree shows from
+    ///   here. When false (used by the folder-tree click handler itself),
+    ///   only the active folder changes — the tree stays anchored.
+    func loadFolder(_ url: URL, setAsAnchor: Bool = true) async {
         selectedIndex = nil
         lastError = nil
         defer { loadPhase = nil }
+        if setAsAnchor { anchorFolder = url }
 
         // Clean up any previous extracted-archive dir so /tmp doesn't fill up
         // when the user opens several archives in a row.
@@ -286,6 +302,7 @@ final class AppState {
             extractedArchiveDir = nil
         }
         folder = nil
+        anchorFolder = nil
         imageURLs = []
         selectedIndex = nil
         loadPhase = nil

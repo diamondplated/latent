@@ -22,6 +22,13 @@ struct BrowserView: View {
 
     var body: some View {
         HSplitView {
+            // Far-left pane: folder tree (collapsible). Default off — toggled
+            // from the toolbar — so the layout stays simple unless the user
+            // wants to drill around a parent dir.
+            if state.showFolderTree {
+                FolderTreeView(state: state)
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+            }
             sidebar
                 .frame(minWidth: 240, idealWidth: 320)
             DetailView(state: state, enhanceState: enhanceState)
@@ -34,6 +41,17 @@ struct BrowserView: View {
         .onKeyPress(phases: [.down, .up]) { press in handleBlinkKey(press) }
         .onKeyPress(phases: .down) { press in handleKey(press) }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    state.showFolderTree.toggle()
+                } label: {
+                    Image(systemName: state.showFolderTree
+                          ? "sidebar.left"
+                          : "list.bullet.indent")
+                }
+                .help(state.showFolderTree ? "Hide folder tree" : "Show folder tree")
+                .keyboardShortcut("l", modifiers: .command)
+            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $mode) {
                     ForEach(BrowseMode.allCases) { m in
