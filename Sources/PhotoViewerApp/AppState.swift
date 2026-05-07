@@ -275,6 +275,21 @@ final class AppState {
         fileWatcher = nil
     }
 
+    /// Close the current album: drop selection + URL list, swap back to the
+    /// empty state. Called by the double-Escape shortcut. Doesn't clear
+    /// recents — the folder stays in MRU so re-opening is one click away.
+    func closeFolder() {
+        stopWatching()
+        if let prev = extractedArchiveDir {
+            try? FileManager.default.removeItem(at: prev)
+            extractedArchiveDir = nil
+        }
+        folder = nil
+        imageURLs = []
+        selectedIndex = nil
+        loadPhase = nil
+    }
+
     // Note: no deinit cancel of fileWatcher — main-actor isolation prevents
     // accessing it from a nonisolated deinit. The AppState lives for the
     // lifetime of the app in this minimal version, so OS cleans up at exit.

@@ -16,6 +16,12 @@ import AppKit
 @MainActor
 final class NavigationKeyMonitor {
     private var monitor: Any?
+    /// Timestamp of the most recent Escape press. Used to detect a double-
+    /// tap (two Escapes within `escapeDoubleTapWindow`) which closes the
+    /// album. A single Escape does nothing — staying out of the way of
+    /// SwiftUI's default Escape handling for sheets / cancel buttons.
+    private var lastEscape: Date?
+    private let escapeDoubleTapWindow: TimeInterval = 0.45
 
     func install(state: AppState) {
         guard monitor == nil else { return }
@@ -55,8 +61,24 @@ final class NavigationKeyMonitor {
         case 124, 125, 49: // right, down, space — all advance
             state.selectNext()
             return nil
+        case 53: // escape
+            return handleEscape(state: state, event: event)
         default:
             return event
         }
+    }
+
+    /// Two Escapes within ~450ms close the album. Single Escape passes
+    /// through so existing dialog/sheet/cancel behavior keeps working.
+    private func handleEscape(state: AppState, event: NSEvent) -> NSEvent? {
+        guard state.folder != nil else { return event }
+        let now = Date()
+        if let last = lastEscape, now.timeIntervalSince(last) < escapeDoubleTapWindow {
+            state.closeFolder()
+            lastEscape = nil
+            return nil  // swallow the second Esc
+        }
+        lastEscape = now
+        return event  // let the first Esc propagate
     }
 }
