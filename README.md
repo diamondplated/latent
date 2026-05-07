@@ -25,8 +25,10 @@ What's working:
   - `Denoise` (NAFNet), `ArtifactRemoval` (FBCNN) — model if present, identity passthrough otherwise
   - `FaceRestore` (GFPGAN) — Vision face detection → per-face crop → model → feathered alpha composite; fast-paths to identity if no faces detected or model unavailable
 - ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), `SearchEngine` (folder walk + index-or-skip + image-image queries). **Text-query path is stubbed** pending the BPE tokenizer port.
-- ✅ `PhotoViewerApp` — minimal SwiftUI app: folder picker → thumbnail grid → detail view, arrow-key navigation, file-system watch for hot-reload. No vim keymap, A/B compare, or pipeline UI yet.
-- ✅ `pv-pipeline` CLI — 17 self-verification scenarios
+- ✅ `PhotoViewerApp` — SwiftUI app: folder picker → thumbnail grid (with color labels, picks/rejects from vim) ↔ map view → detail view with vim keymap (j/k/gg/G/marks/picks/labels), in-app pipeline UI (per-stage toggles + sliders + live preview), A/B compare (enhanced / original / side-by-side, hold-B blink), synced zoom/pan (0.25–16×, drag to pan, pinch to zoom, double-tap reset).
+- ✅ `PhotoQuickLook` — `QuickLookRenderer` using ImageIO's downsample fast path. Ready for an Xcode-based QL extension target to import directly.
+- ✅ `scripts/build_app.sh` — packages a real `.app` bundle from `swift build` output. Info.plist registers photo-viewer as a viewer for JPEG/HEIC/PNG/TIFF/RAW etc. so Finder offers `Open With → photo-viewer`.
+- ✅ `pv-pipeline` CLI — 27 self-verification scenarios
 
 What's stubbed:
 
@@ -37,8 +39,12 @@ What's stubbed:
 
 ```bash
 swift build
-swift run pv-pipeline                  # run the verifier
-swift run PhotoViewerApp               # launch the SwiftUI viewer
+swift run pv-pipeline                  # run the verifier (27 checks)
+swift run PhotoViewerApp               # launch the viewer from the package binary
+
+# Build a real .app bundle (registers as a viewer for image types):
+./scripts/build_app.sh
+open build/PhotoViewerApp.app
 ```
 
 Expected output:
@@ -87,7 +93,8 @@ photo-viewer/
 │   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager / FaceDetector / FaceComposite
 │   ├── PhotoSearch/           # EmbeddingVector / EmbeddingIndex / CLIPImageEncoder / SearchEngine (text encoder stubbed)
 │   ├── PipelineCLI/           # `pv-pipeline` runner + self-verifier
-│   └── PhotoViewerApp/        # Minimal SwiftUI viewer
+│   ├── PhotoQuickLook/        # QuickLookRenderer (consumed by future QL extension target)
+│   └── PhotoViewerApp/        # SwiftUI viewer (folder browse, vim keymap, map view, in-app pipeline UI, A/B compare)
 ├── Resources/
 │   └── Models/                # .mlpackage files land here (gitignored)
 ├── scripts/
@@ -96,7 +103,10 @@ photo-viewer/
 │   ├── convert_fbcnn.py       # Artifact removal: FBCNN
 │   ├── convert_gfpgan.py      # Face restore: GFPGAN v1.4
 │   ├── convert_openclip.py    # Search: OpenCLIP ViT-B/32 (image + text encoders)
+│   ├── build_app.sh           # Package PhotoViewerApp as a real .app bundle
 │   └── requirements.txt
+├── Resources/AppBundle/
+│   └── Info.plist             # Document types, bundle ID, etc. for the .app bundle
 └── Tests/
     └── PipelineCoreTests/     # XCTest target (needs Xcode)
 ```
@@ -126,17 +136,13 @@ In order of dependency:
 3. ~~**Search infrastructure**~~ — done for image-image. Text-query needs the BPE tokenizer port (next).
 4. ~~**SwiftUI app shell**~~ — minimal version done; folder picker, thumbnail grid, detail view, arrow nav.
 
-5. **CLIP BPE tokenizer in Swift** (~1 week) — port `clip.simple_tokenizer` so text queries work. Vocab + merges files live in app bundle resources.
-
-6. **SwiftUI app polish** (4-6 weeks) — vim keymap dispatcher, A/B compare with synced zoom/pan, in-app pipeline UI (per-stage toggles + sliders + live preview), Metal-backed image renderer for proper color management, MapKit-based map view with GPS clustering.
-
-7. **Migrate to Xcode project** (1-2 weeks) — proper bundle, code signing, sandbox entitlements, app icon, App Store packaging.
-
-8. **System integration** (2-3 weeks) — Quick Look extension target, default-app registration, drag in/out from Finder.
-
+5. ~~**CLIP BPE tokenizer in Swift**~~ — done. `CLIPBPETokenizer` ports `simple_tokenizer.py`. Run `convert_openclip.py` to populate the merges file.
+6. ~~**SwiftUI app polish**~~ (most) — done. Vim keymap, A/B compare, synced zoom/pan, map view, in-app pipeline UI all wired. Remaining: status-bar progress, keybind cheatsheet (?), Metal-backed renderer for proper HDR/wide-gamut display.
+7. **Migrate to Xcode project** (1-2 weeks) — proper bundle (today the `build_app.sh` script gets close, but Xcode handles code signing, sandbox entitlements, app icon, App Store packaging, and notarization). Adding the Quick Look extension target lives in this milestone — `PhotoQuickLook.QuickLookRenderer` is already shipped and ready to import.
+8. **System integration** (2-3 weeks) — Quick Look extension target (built atop `PhotoQuickLook`), drag in/out from Finder, default-app registration ranking (today: `LSHandlerRank=Alternate`).
 9. **Polish + beta** (4-6 weeks) — perf tuning on real 50MP+ images, lazy-download flow for models, App Store submission.
 
-Most of the original 5-7 month plan got front-loaded into this scaffold; remaining work is largely UI polish, the tokenizer port, and Xcode/App-Store packaging.
+Most of the original 5-7 month plan got front-loaded into this scaffold. Remaining work is largely Xcode/App-Store packaging plus UI polish.
 
 ## License
 
