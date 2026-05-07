@@ -33,12 +33,51 @@ struct DetailView: View {
         }
         .animation(.easeInOut(duration: 0.18), value: state.showEnhancementPanel)
         .task(id: currentURL) {
+            // Update the prefetch window FIRST — this both seeds the cache
+            // for next-press neighbors and lets us hand a cache hit
+            // straight to loadCurrent. Sync call (no await), instant
+            // because window-update is in-memory only.
+            updatePrefetchWindow()
             await loadCurrent()
             // Reset zoom/pan whenever the underlying photo changes so the
             // user doesn't open a fresh photo at the previous photo's pan.
             zoom = 1.0
             pan = .zero
         }
+    }
+
+    /// Tell the prefetcher to keep the current photo + the ±2 neighbors
+    /// in cache, evict everything else, and start decoding any window
+    /// entry that isn't already there. Cheap (a few set ops + at most
+    /// 2-3 task spawns); runs every selection change.
+    private func updatePrefetchWindow() {
+        guard let i = state.selectedIndex, i < state.imageURLs.count else {
+            state.prefetcher.updateWindow(focus: nil, neighbors: [])
+            return
+        }
+        let urls = state.imageURLs
+        let focus = urls[i]
+        // ±2 neighbors, clamped to bounds. Skip videos / animated images
+        // — those don't go through the CGImage decode path so prefetching
+        // them would just burn memory on data we won't render via the
+        // cache.
+        let radius = 2
+        var neighbors: [URL] = []
+        for offset in [-1, 1, -2, 2] {  // closest first
+            let idx = i + offset
+            guard idx >= 0 && idx < urls.count else { continue }
+            let url = urls[idx]
+            if MediaTyping.detect(url) == .staticImage {
+                neighbors.append(url)
+            }
+            if neighbors.count >= radius * 2 { break }
+        }
+        // The focus URL may itself be a video/animated; the prefetcher
+        // accepts whatever (it'll just decode + cache, no harm), but we
+        // only schedule a decode for static images. Pass focus through
+        // regardless so a cache HIT for a previously-prefetched static
+        // gets promoted in the LRU.
+        state.prefetcher.updateWindow(focus: focus, neighbors: neighbors)
     }
 
     /// Image area: single pane (enhanced or original), or side-by-side
@@ -317,7 +356,11 @@ struct DetailView: View {
     @MainActor
     private func loadCurrent() async {
         guard let url = currentURL else { return }
-        await enhanceState.loadInput(url: url)
+        // Cache hit on the prefetch ring → hand the decoded CGImage
+        // straight to EnhancementState, skipping the disk decode entirely.
+        // Miss falls through to the normal preview-decode path.
+        let cached = state.prefetcher.image(for: url)
+        await enhanceState.loadInput(url: url, prefetched: cached)
     }
 }
 

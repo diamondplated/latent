@@ -141,13 +141,15 @@ final class EnhancementState {
     /// Calling again with a different URL cancels the previous run.
     ///
     /// Two-phase load:
-    ///   1. Fast preview: NSImage(contentsOf:) on a detached task — typically
-    ///      ~50-150ms for a 14MP JPEG, no color management overhead. Shown
-    ///      immediately so navigation feels instant.
+    ///   1. Fast preview: CGImageSource decode on a detached task — typically
+    ///      ~50-150ms for a 14MP JPEG. Shown immediately so navigation feels
+    ///      instant. **Skipped entirely on prefetch cache hit** — the
+    ///      ImagePrefetcher has already decoded the neighbors, so cache
+    ///      lookups land synchronously and the swap is sub-frame.
     ///   2. Full buffer: ImageReader.read() does the linear-sRGB float16
     ///      conversion needed by the pipeline. Hundreds of ms — happens in
     ///      the background, then runPipeline() kicks off.
-    func loadInput(url: URL) async {
+    func loadInput(url: URL, prefetched: CGImage? = nil) async {
         // If the user re-clicks the same URL we're already on, do nothing —
         // avoids a redundant re-decode and pipeline run when the selection
         // change in DetailView fires `.task(id:)` on the same URL.
@@ -170,6 +172,21 @@ final class EnhancementState {
         enhancedBuffer = nil
         originalMetadata = nil
         lastError = nil
+
+        // Prefetch fast path: caller (the BrowserView selection handler)
+        // looked up the prefetcher and passed in a decoded CGImage. Skip
+        // the disk decode entirely — we already have the pixels.
+        if let prefetched {
+            previewCGImage = prefetched
+            originalCGImage = nil
+            enhancedCGImage = nil
+            // Same as the slow path: only run the heavy buffer read if the
+            // user is actually going to need the pipeline output.
+            if compareMode != .original {
+                await loadFullBuffer(url: url, generation: myGen)
+            }
+            return
+        }
 
         // Phase 1: fast full-resolution preview as a CGImage. The CGImage
         // carries the source file's native color space (Display P3, Adobe
