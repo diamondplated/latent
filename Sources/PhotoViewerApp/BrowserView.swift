@@ -16,16 +16,22 @@ struct BrowserView: View {
     @State private var vimKeymap = VimKeymap()
     @State private var locationCache = PhotoLocationCache()
     @State private var mode: BrowseMode = .grid
+    /// Hoisted from DetailView so the keypress handler here can drive blink
+    /// state (B key down/up) and so the cache survives across mode switches.
+    @State private var enhanceState = EnhancementState()
 
     var body: some View {
         HSplitView {
             sidebar
                 .frame(minWidth: 240, idealWidth: 320)
-            DetailView(state: state)
+            DetailView(state: state, enhanceState: enhanceState)
                 .frame(minWidth: 480)
         }
         .focusable()
         .focusEffectDisabled()
+        // B is special: hold-to-blink the original. Need both `.down` and
+        // `.up` phases so we can release the override when the key lifts.
+        .onKeyPress(phases: [.down, .up]) { press in handleBlinkKey(press) }
         .onKeyPress(phases: .down) { press in handleKey(press) }
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -106,6 +112,24 @@ struct BrowserView: View {
                 }
             }
         )
+    }
+
+    // MARK: - Blink (hold B to peek at the original)
+
+    /// Hold B to override the compare mode to `.original`. On release, restore
+    /// whatever was selected. Returns `.handled` only when the key is B; lets
+    /// other keys propagate to `handleKey` (the vim dispatcher).
+    @MainActor
+    private func handleBlinkKey(_ press: KeyPress) -> KeyPress.Result {
+        guard press.key.character == "b" || press.key.character == "B" else {
+            return .ignored
+        }
+        switch press.phase {
+        case .down:    enhanceState.blinking = true
+        case .up:      enhanceState.blinking = false
+        default: break
+        }
+        return .handled
     }
 
     // MARK: - Vim keymap bridge
