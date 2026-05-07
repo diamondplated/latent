@@ -89,11 +89,58 @@ public struct FaceRestore: Stage {
     public let displayName = "Face Restore"
     public init() {}
 
+    /// Algorithm:
+    ///   1. Detect faces (Apple Vision)
+    ///   2. For each face: pad bounds, crop, resize to model input (512×512),
+    ///      run model, resize back to crop dims
+    ///   3. Composite each restored face into a copy of input with feathered
+    ///      alpha at face-region edges
+    /// Falls back to identity if (a) no faces detected, (b) all faces below
+    /// minFaceSize, or (c) the model file isn't available.
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
         progress.report(0.0)
-        try await Task.sleep(nanoseconds: 1_000_000)
-        progress.report(1.0)
-        return input
+        defer { progress.report(1.0) }
+
+        if params.strength == 0 { return input }
+
+        let detector = FaceDetector()
+        let faces = try await detector.detect(in: input)
+            .filter { Int($0.bounds.width) >= params.minFaceSize && Int($0.bounds.height) >= params.minFaceSize }
+
+        if faces.isEmpty { return input }
+
+        let model = try await ModelManager.shared.model(for: .faceRestoreGFPGAN, spec: .gfpgan)
+        guard let model else { return input }
+
+        // GFPGAN's standard input size.
+        let modelInputSize = 512
+        // The reference identity-preserve bias maps to a strength multiplier:
+        // higher bias = lighter blend (more original face preserved). At
+        // identityPreserveBias=0, full strength; at 1, blend factor halves.
+        let blendStrength = Float(params.strength) * (1.0 - 0.5 * Float(params.identityPreserveBias))
+
+        var result = input
+        for (i, face) in faces.enumerated() {
+            let rect = FaceComposite.paddedFaceRect(
+                face: face,
+                imageWidth: input.width,
+                imageHeight: input.height
+            )
+            let crop = FaceComposite.crop(input, rect: rect)
+            let modelInput = try FaceComposite.resize(crop, toWidth: modelInputSize, height: modelInputSize)
+            let modelOutput = try await model.predict(modelInput)
+            let restored = try FaceComposite.resize(modelOutput, toWidth: Int(rect.width), height: Int(rect.height))
+
+            result = FaceComposite.blend(
+                base: result,
+                restored: restored,
+                atRect: rect,
+                featherWidth: 16,
+                strength: blendStrength
+            )
+            progress.report(Double(i + 1) / Double(faces.count))
+        }
+        return result
     }
 }
 
