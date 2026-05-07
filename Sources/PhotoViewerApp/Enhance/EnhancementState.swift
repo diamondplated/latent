@@ -58,18 +58,19 @@ final class EnhancementState {
     /// EXIF/color-space round-trips correctly.
     private(set) var originalMetadata: ImageMetadata? = nil
 
-    /// Fast-path NSImage shown immediately on selection change so navigation
-    /// feels instant. Loaded via NSImage(contentsOf:) — orders of magnitude
-    /// faster than the full color-managed `ImageReader.read()` path because
-    /// it skips conversion to linear sRGB float16. The "real" pipeline-ready
-    /// buffer arrives later via `originalBuffer`.
-    private(set) var previewNSImage: NSImage? = nil
-    /// Rendered NSImage of `originalBuffer`, cached so SwiftUI doesn't redo
-    /// the float16 → CGImage bridge on every body() call. nil before the
-    /// working buffer is ready; falls back to `previewNSImage` in `displayedNSImage`.
-    private(set) var originalNSImage: NSImage? = nil
-    /// Rendered NSImage of `enhancedBuffer`, cached likewise.
-    private(set) var enhancedNSImage: NSImage? = nil
+    /// Fast-path full-resolution CGImage shown immediately on selection
+    /// change so navigation feels instant. Decoded via CGImageSource (no
+    /// NSImage middleman that can pick a smaller representation, and
+    /// preserves the source's color space — Display P3 / Adobe RGB photos
+    /// stay in their native gamut all the way to the SwiftUI Image view).
+    private(set) var previewCGImage: CGImage? = nil
+    /// CGImage of `originalBuffer`, cached so SwiftUI doesn't redo the
+    /// float16 → CGImage bridge on every body() call. nil before the
+    /// working buffer is ready; `originalDisplayImage` falls back to
+    /// `previewCGImage`.
+    private(set) var originalCGImage: CGImage? = nil
+    /// CGImage of `enhancedBuffer`, cached likewise.
+    private(set) var enhancedCGImage: CGImage? = nil
 
     /// User-selected comparison mode. `displayMode` adds the transient blink
     /// override on top. Defaults to `.original` so simply browsing photos
@@ -87,19 +88,19 @@ final class EnhancementState {
         blinking ? .original : compareMode
     }
 
-    /// NSImage to render in the "original" pane. Falls back through:
-    ///   1. fully-decoded working buffer (color-managed, slowest to arrive)
-    ///   2. fast preview from NSImage(contentsOf:) (instant)
+    /// CGImage to render in the "original" pane. Falls back through:
+    ///   1. fully-decoded working buffer (slowest to arrive)
+    ///   2. fast preview from CGImageSource (instant)
     ///   3. nil → caller shows skeleton
-    var originalDisplayImage: NSImage? { originalNSImage ?? previewNSImage }
+    var originalDisplayImage: CGImage? { originalCGImage ?? previewCGImage }
 
-    /// NSImage to render in the "enhanced" pane. Falls back through:
+    /// CGImage to render in the "enhanced" pane. Falls back through:
     ///   1. pipeline output (slowest to arrive)
     ///   2. original buffer (so user sees something during enhancement)
     ///   3. fast preview
     ///   4. nil
-    var enhancedDisplayImage: NSImage? {
-        enhancedNSImage ?? originalNSImage ?? previewNSImage
+    var enhancedDisplayImage: CGImage? {
+        enhancedCGImage ?? originalCGImage ?? previewCGImage
     }
 
     /// True only when we have absolutely no image to show — controls whether
@@ -170,28 +171,27 @@ final class EnhancementState {
         originalMetadata = nil
         lastError = nil
 
-        // Phase 1: fast full-resolution preview. Decode via CGImageSource
-        // (NOT NSImage(contentsOf:) which can lazy-load a smaller
-        // representation) and wrap with explicit native size so the display
-        // gets the actual pixels at full quality. Honors EXIF orientation
-        // via `kCGImageSourceCreateThumbnailWithTransform` on the read path.
-        async let previewTask: NSImage? = Task.detached(priority: .userInitiated) {
+        // Phase 1: fast full-resolution preview as a CGImage. The CGImage
+        // carries the source file's native color space (Display P3, Adobe
+        // RGB, etc.), so passing it straight into SwiftUI's Image view
+        // means wide-gamut photos stay in their gamut on capable displays.
+        async let previewTask: CGImage? = Task.detached(priority: .userInitiated) {
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
                 return nil
             }
-            return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            return cg
         }.value
 
         // Apply the preview first so the UI swaps to the new photo
-        // immediately. Same-step nil out the cached NSImages of the
+        // immediately. Same-step nil out the cached CGImages of the
         // previous photo so we don't keep displaying stale content if
         // the preview decode took longer than a vsync.
         let preview = await previewTask
         if myGen == loadGeneration {
-            previewNSImage = preview
-            originalNSImage = nil
-            enhancedNSImage = nil
+            previewCGImage = preview
+            originalCGImage = nil
+            enhancedCGImage = nil
         }
 
         // Phase 2: full pipeline-ready buffer + metadata. Only kick this off
@@ -228,8 +228,8 @@ final class EnhancementState {
             originalBuffer = buffer
             originalMetadata = metadata
             // Render the working-format buffer once and cache it. Falls back
-            // to previewNSImage in `displayedNSImage` if this is somehow nil.
-            originalNSImage = buffer.makeNSImage()
+            // to previewCGImage in `originalDisplayImage` if this is somehow nil.
+            originalCGImage = try? buffer.makeCGImage()
             runPipeline()
         case .failure(let error):
             lastError = "Read failed: \(error.localizedDescription)"
@@ -351,9 +351,9 @@ final class EnhancementState {
         switch result {
         case .success(let buffer):
             enhancedBuffer = buffer
-            // Cache the rendered NSImage so paneView doesn't redo the
+            // Cache the rendered CGImage so paneView doesn't redo the
             // float16 → CGImage bridge on every body call.
-            enhancedNSImage = buffer.makeNSImage()
+            enhancedCGImage = try? buffer.makeCGImage()
             lastError = nil
         case .failure(let error):
             // PipelineError.cancelled is expected on rapid edits — don't
@@ -425,14 +425,5 @@ enum CompareMode: String, CaseIterable, Sendable, Identifiable {
     }
 }
 
-// MARK: - NSImage helper
-
-extension ImageBuffer {
-    /// Render the buffer as an NSImage suitable for SwiftUI display. Returns
-    /// nil if the bridge fails (shouldn't happen for well-formed working
-    /// buffers).
-    func makeNSImage() -> NSImage? {
-        guard let cg = try? makeCGImage() else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: width, height: height))
-    }
-}
+// (NSImage helper removed — display pipeline now uses CGImage directly to
+// preserve source color spaces and skip an unnecessary copy.)

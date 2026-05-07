@@ -26,6 +26,10 @@ final class AppState {
     var loadPhase: LoadPhase? = nil
     /// Last error surface (extraction failed, etc.) — UI can show in a toast.
     var lastError: String? = nil
+    /// MRU list of opened folders — drives the empty-state Recent panel.
+    /// Shared singleton so the empty state and any future "Open Recent" menu
+    /// stay in sync.
+    let recents = RecentFolders()
 
     /// What stage the folder/archive open is in. Used to drive the loader UI.
     enum LoadPhase: Equatable {
@@ -94,6 +98,15 @@ final class AppState {
         }
 
         folder = scanRoot
+        // Push the user's ORIGINAL pick (which may be an archive file) to
+        // the recents — re-opening from recents replays the same flow,
+        // including extraction. Only push real, non-temp paths so cleaned-
+        // up extraction dirs don't poison the list.
+        if extractedArchiveDir == nil {
+            recents.push(url)
+        } else {
+            recents.push(url)  // archives are pushed as the .zip path
+        }
         loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
         // Stream-collect on a background task so SwiftUI doesn't see imageURLs
         // grow batch-by-batch (each batch update was forcing the toolbar /

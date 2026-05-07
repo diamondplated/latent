@@ -71,7 +71,7 @@ struct DetailView: View {
         }
     }
 
-    private var imageForDisplay: NSImage? {
+    private var imageForDisplay: CGImage? {
         switch enhanceState.displayMode {
         case .original:    return enhanceState.originalDisplayImage
         case .enhanced:    return enhanceState.enhancedDisplayImage
@@ -82,17 +82,19 @@ struct DetailView: View {
     /// One image pane with the current zoom/pan transform applied. The label
     /// (when supplied) is a small monogram in the top-left of the pane —
     /// shown in side-by-side mode so the user knows which side is which.
-    /// Uses pre-rendered NSImages from EnhancementState to avoid redoing the
-    /// float16 → CGImage bridge on every body call.
-    private func paneView(image: NSImage?, label: String?) -> some View {
+    ///
+    /// Uses CGImage directly (not NSImage) so the source's native color space
+    /// — Display P3, Adobe RGB, etc. — survives all the way to the SwiftUI
+    /// renderer without being squashed to sRGB by an intermediate NSImage.
+    private func paneView(image: CGImage?, label: String?) -> some View {
         ZStack {
-            if let nsImage = image {
-                // Note: deliberately NO transition / animation on the image
-                // swap. Cross-fading the old NSImage out while the new one
-                // fades in produced "phantom shadow" double-exposures during
-                // arrow-key nav. Instant swap is faster, sharper, more like
-                // Preview.app's behavior.
-                Image(nsImage: nsImage)
+            if let cg = image {
+                // No transition / animation on the swap. Cross-fading the
+                // old image out while the new one fades in produced "phantom
+                // shadow" double-exposures during rapid arrow nav. Instant
+                // swap matches Preview.app's behavior. .id forces view
+                // identity reset so SwiftUI doesn't try to morph layouts.
+                Image(decorative: cg, scale: 1.0, orientation: .up)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
@@ -100,9 +102,7 @@ struct DetailView: View {
                     .scaleEffect(zoom * transientZoom)
                     .offset(x: pan.width + transientPan.width,
                             y: pan.height + transientPan.height)
-                    .id(nsImage)  // force view identity reset on swap so
-                                  // SwiftUI doesn't try to morph the old
-                                  // Image into the new one's frame
+                    .id(ObjectIdentifier(cg))
             } else if currentURL == nil {
                 Text("Select a photo")
                     .foregroundStyle(.secondary)
