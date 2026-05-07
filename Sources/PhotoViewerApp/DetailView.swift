@@ -67,25 +67,45 @@ struct DetailView: View {
         }
     }
 
-    /// Math: SwiftUI's `.scaleEffect(z)` scales the inner view around its
-    /// center. For a point at `loc` to land at the pane's center after
-    /// scaling, we offset by `-(z-1) * (loc - paneCenter)`.
+    /// Cycle through 1× → 2× → 3× → 4× → 1× on each double-click, recentering
+    /// on the clicked point at every step. So the user can quickly zoom in
+    /// further without panning manually — click on the area of interest,
+    /// click again to push deeper, click a fourth time to come back out.
+    ///
+    /// Math: `.scaleEffect(z)` scales the inner view around the pane center,
+    /// then `.offset(p)` translates. So a pre-transform view point V ends
+    /// up at pane position `C + (V − C)·z + p`. To make the point currently
+    /// at pane position L (under the user's cursor) land at the new pane
+    /// center after a zoom change to z_new:
+    ///     p_new = (C + p_cur − L) · (z_new / z_cur)
+    /// Generalizes correctly to ALL incremental zooms (the previous version
+    /// assumed z_cur == 1 and was off by a factor on later clicks).
     private func handleDoubleTap(at location: CGPoint, paneSize: CGSize) {
         withAnimation(.spring(duration: 0.28)) {
-            let alreadyZoomed = abs(zoom - 1.0) > 0.01
-            if alreadyZoomed {
-                // Toggle off — fit-to-window
+            let target = nextZoomStep(from: zoom)
+            if target <= 1.0 {
+                // Cycle back to fit-to-window — pan resets too.
                 zoom = 1.0
                 pan = .zero
-            } else {
-                let target: CGFloat = 4.0
-                let center = CGPoint(x: paneSize.width / 2, y: paneSize.height / 2)
-                let dx = (center.x - location.x) * (target - 1)
-                let dy = (center.y - location.y) * (target - 1)
-                zoom = target
-                pan = CGSize(width: dx, height: dy)
+                return
             }
+            let center = CGPoint(x: paneSize.width / 2, y: paneSize.height / 2)
+            let factor = target / max(zoom, 0.0001)
+            let dx = (center.x + pan.width  - location.x) * factor
+            let dy = (center.y + pan.height - location.y) * factor
+            zoom = target
+            pan = CGSize(width: dx, height: dy)
         }
+    }
+
+    /// 1× → 2× → 3× → 4× → 1× cycle. Buckets accept a little slack so a
+    /// user who pinch-zoomed to e.g. 2.4× then double-clicks still gets
+    /// the next step (3×) rather than landing back at 2×.
+    private func nextZoomStep(from current: CGFloat) -> CGFloat {
+        if current < 1.5 { return 2.0 }
+        if current < 2.5 { return 3.0 }
+        if current < 3.5 { return 4.0 }
+        return 1.0
     }
 
     @ViewBuilder
