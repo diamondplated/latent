@@ -31,6 +31,7 @@ struct PipelineCLI {
         failures += await runVerification("TileExecutor single-tile fast path is exact identity", check: tileExecutorSingleTile)
         failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
         failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
+        failures += await runVerification("FaceRestore is identity for an image with no detectable faces", check: faceRestoreNoFaces)
 
         print()
         if failures == 0 {
@@ -430,6 +431,20 @@ func tileExecutorMultiTileIdentity() async throws {
     // Float16 quantization noise (mantissa precision ~3e-4 for unit-range values).
     let mae = meanAbsoluteRGBDifference(input, output)
     try require(mae < 5e-3, "multi-tile identity diverged: MAE = \(mae)")
+}
+
+func faceRestoreNoFaces() async throws {
+    // Synthetic gradient has no faces. FaceRestore should detect zero faces
+    // and return input unchanged (no model call needed).
+    let input = makeGradientBuffer(width: 256, height: 256)
+    let stage = FaceRestore()
+    let output = try await stage.process(
+        input: input,
+        params: .init(strength: 0.7, minFaceSize: 64, identityPreserveBias: 0.5),
+        progress: .noop
+    )
+    try require(output.width == 256 && output.height == 256, "dimensions changed")
+    try require(output.pixels == input.pixels, "no-faces fast path should pass through bytes unchanged")
 }
 
 func tileExecutorUpscaleDimensions() async throws {
