@@ -181,19 +181,19 @@ struct DetailView: View {
         switch enhanceState.displayMode {
         case .sideBySide:
             HStack(spacing: 1) {
-                paneView(buffer: enhanceState.originalBuffer, label: "ORIGINAL")
+                paneView(image: enhanceState.originalDisplayImage, label: "ORIGINAL")
                 Rectangle().fill(Color.gray.opacity(0.4)).frame(width: 1)
-                paneView(buffer: enhanceState.enhancedBuffer ?? enhanceState.originalBuffer, label: "ENHANCED")
+                paneView(image: enhanceState.enhancedDisplayImage, label: "ENHANCED")
             }
         default:
-            paneView(buffer: bufferForDisplay, label: nil)
+            paneView(image: imageForDisplay, label: nil)
         }
     }
 
-    private var bufferForDisplay: ImageBuffer? {
+    private var imageForDisplay: NSImage? {
         switch enhanceState.displayMode {
-        case .original:    return enhanceState.originalBuffer
-        case .enhanced:    return enhanceState.enhancedBuffer ?? enhanceState.originalBuffer
+        case .original:    return enhanceState.originalDisplayImage
+        case .enhanced:    return enhanceState.enhancedDisplayImage
         case .sideBySide:  return nil // handled in `content`
         }
     }
@@ -201,9 +201,11 @@ struct DetailView: View {
     /// One image pane with the current zoom/pan transform applied. The label
     /// (when supplied) is a small monogram in the top-left of the pane —
     /// shown in side-by-side mode so the user knows which side is which.
-    private func paneView(buffer: ImageBuffer?, label: String?) -> some View {
+    /// Uses pre-rendered NSImages from EnhancementState to avoid redoing the
+    /// float16 → CGImage bridge on every body call.
+    private func paneView(image: NSImage?, label: String?) -> some View {
         ZStack {
-            if let buffer, let nsImage = buffer.makeNSImage() {
+            if let nsImage = image {
                 Image(nsImage: nsImage)
                     .resizable()
                     .interpolation(.high)
@@ -212,13 +214,15 @@ struct DetailView: View {
                     .scaleEffect(zoom * transientZoom)
                     .offset(x: pan.width + transientPan.width,
                             y: pan.height + transientPan.height)
+                    .transition(.opacity)
             } else if currentURL == nil {
                 Text("Select a photo")
                     .foregroundStyle(.secondary)
             } else {
-                ProgressView()
+                PhotoSkeleton()
             }
         }
+        .animation(.easeOut(duration: 0.15), value: image)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .overlay(alignment: .topLeading) {

@@ -53,6 +53,19 @@ final class EnhancementState {
     /// EXIF/color-space round-trips correctly.
     private(set) var originalMetadata: ImageMetadata? = nil
 
+    /// Fast-path NSImage shown immediately on selection change so navigation
+    /// feels instant. Loaded via NSImage(contentsOf:) — orders of magnitude
+    /// faster than the full color-managed `ImageReader.read()` path because
+    /// it skips conversion to linear sRGB float16. The "real" pipeline-ready
+    /// buffer arrives later via `originalBuffer`.
+    private(set) var previewNSImage: NSImage? = nil
+    /// Rendered NSImage of `originalBuffer`, cached so SwiftUI doesn't redo
+    /// the float16 → CGImage bridge on every body() call. nil before the
+    /// working buffer is ready; falls back to `previewNSImage` in `displayedNSImage`.
+    private(set) var originalNSImage: NSImage? = nil
+    /// Rendered NSImage of `enhancedBuffer`, cached likewise.
+    private(set) var enhancedNSImage: NSImage? = nil
+
     /// User-selected comparison mode. `displayMode` adds the transient blink
     /// override on top.
     var compareMode: CompareMode = .enhanced
@@ -65,6 +78,25 @@ final class EnhancementState {
     var displayMode: CompareMode {
         blinking ? .original : compareMode
     }
+
+    /// NSImage to render in the "original" pane. Falls back through:
+    ///   1. fully-decoded working buffer (color-managed, slowest to arrive)
+    ///   2. fast preview from NSImage(contentsOf:) (instant)
+    ///   3. nil → caller shows skeleton
+    var originalDisplayImage: NSImage? { originalNSImage ?? previewNSImage }
+
+    /// NSImage to render in the "enhanced" pane. Falls back through:
+    ///   1. pipeline output (slowest to arrive)
+    ///   2. original buffer (so user sees something during enhancement)
+    ///   3. fast preview
+    ///   4. nil
+    var enhancedDisplayImage: NSImage? {
+        enhancedNSImage ?? originalNSImage ?? previewNSImage
+    }
+
+    /// True only when we have absolutely no image to show — controls whether
+    /// DetailView shows the skeleton loader.
+    var hasAnyImage: Bool { originalDisplayImage != nil || enhancedDisplayImage != nil }
 
     /// Backward-compat for the existing badge / dimensions code in DetailView.
     /// Tracks whatever's effectively rendering (including transient blink).
@@ -98,6 +130,14 @@ final class EnhancementState {
 
     /// Load a photo from disk into the editor and run the pipeline once.
     /// Calling again with a different URL cancels the previous run.
+    ///
+    /// Two-phase load:
+    ///   1. Fast preview: NSImage(contentsOf:) on a detached task — typically
+    ///      ~50-150ms for a 14MP JPEG, no color management overhead. Shown
+    ///      immediately so navigation feels instant.
+    ///   2. Full buffer: ImageReader.read() does the linear-sRGB float16
+    ///      conversion needed by the pipeline. Hundreds of ms — happens in
+    ///      the background, then runPipeline() kicks off.
     func loadInput(url: URL) async {
         // If the user re-clicks the same URL we're already on, do nothing —
         // avoids a redundant re-decode and pipeline run when the selection
@@ -115,10 +155,21 @@ final class EnhancementState {
         originalBuffer = nil
         enhancedBuffer = nil
         originalMetadata = nil
+        originalNSImage = nil
+        enhancedNSImage = nil
+        previewNSImage = nil
         lastError = nil
 
-        // Read off the main actor — decode is CPU-heavy.
-        let result: Result<(ImageBuffer, ImageMetadata), Error> = await Task.detached(priority: .userInitiated) { [reader] in
+        // Phase 1: fast preview. ImageIO's NSImage init handles EXIF
+        // orientation for free and is dramatically faster than our full
+        // color-managed path. We don't need the result for the pipeline,
+        // just for instant display.
+        async let previewTask: NSImage? = Task.detached(priority: .userInitiated) {
+            return NSImage(contentsOf: url)
+        }.value
+
+        // Phase 2 (in parallel): full pipeline-ready buffer + metadata.
+        async let bufferTask: Result<(ImageBuffer, ImageMetadata), Error> = Task.detached(priority: .userInitiated) { [reader] in
             do {
                 let pair = try reader.read(url: url)
                 return .success(pair)
@@ -127,13 +178,23 @@ final class EnhancementState {
             }
         }.value
 
-        // Bail out if a newer load superseded us.
+        // Apply the preview first so the UI updates immediately.
+        let preview = await previewTask
+        if myGen == loadGeneration {
+            previewNSImage = preview
+        }
+
+        // Then wait for the full buffer.
+        let result = await bufferTask
         guard myGen == loadGeneration else { return }
 
         switch result {
         case .success(let (buffer, metadata)):
             originalBuffer = buffer
             originalMetadata = metadata
+            // Render the working-format buffer once and cache it. Falls back
+            // to previewNSImage in `displayedNSImage` if this is somehow nil.
+            originalNSImage = buffer.makeNSImage()
             runPipeline()
         case .failure(let error):
             lastError = "Read failed: \(error.localizedDescription)"
@@ -222,6 +283,9 @@ final class EnhancementState {
         switch result {
         case .success(let buffer):
             enhancedBuffer = buffer
+            // Cache the rendered NSImage so paneView doesn't redo the
+            // float16 → CGImage bridge on every body call.
+            enhancedNSImage = buffer.makeNSImage()
             lastError = nil
         case .failure(let error):
             // PipelineError.cancelled is expected on rapid edits — don't
