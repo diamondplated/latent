@@ -91,6 +91,9 @@ struct BrowserView: View {
                 .pickerStyle(.segmented)
             }
             ToolbarItem(placement: .primaryAction) {
+                photoSortMenu
+            }
+            ToolbarItem(placement: .primaryAction) {
                 photoCounter
             }
             ToolbarItem(placement: .primaryAction) {
@@ -202,6 +205,25 @@ struct BrowserView: View {
             .transition(.opacity)
             .animation(.easeInOut(duration: 0.2), value: state.isLoading)
         }
+    }
+
+    /// Toolbar sort menu: name vs recently modified. Same enum as the
+    /// folder-tree sort (the user already understands the choice from the
+    /// sidebar; carrying it over avoids a second mental model). Disabled
+    /// while loading so a sort flip mid-scan can't race the load.
+    private var photoSortMenu: some View {
+        Menu {
+            Picker("Sort", selection: $state.photoSort) {
+                ForEach(FolderSort.allCases) { sort in
+                    Label(sort.label, systemImage: sort.symbol).tag(sort)
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+        }
+        .menuIndicator(.hidden)
+        .help("Sort photos")
+        .disabled(state.imageURLs.isEmpty || state.isLoading)
     }
 
     /// Toolbar counter: "i / N" when a photo is selected, "N photos" if

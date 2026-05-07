@@ -30,6 +30,10 @@ final class AppState {
     /// Shared singleton so the empty state and any future "Open Recent" menu
     /// stay in sync.
     let recents = RecentFolders()
+    /// Speculative full-res decoder for the current selection ± neighbors.
+    /// Owned here so trashImage / closeFolder can poke it. The prefetch
+    /// window is updated by BrowserView when selectedIndex changes.
+    let prefetcher = ImagePrefetcher(capacity: 5)
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
     var showEnhancementPanel: Bool = false
@@ -43,14 +47,35 @@ final class AppState {
     var folderSort: FolderSort = .nameAscending {
         didSet { UserDefaults.standard.set(folderSort.rawValue, forKey: "Latent.FolderSort") }
     }
+    /// Sort order applied to photos in the grid. Same enum as folderSort —
+    /// the cases are conceptually identical (Name asc / Modified desc).
+    /// Changes re-sort `imageURLs` in place; no fs work because
+    /// contentModificationDate was prefetched during the walk.
+    var photoSort: FolderSort = .nameAscending {
+        didSet {
+            UserDefaults.standard.set(photoSort.rawValue, forKey: "Latent.PhotoSort")
+            // Keep the user's selection on the same photo across re-sort.
+            let currentlySelected = currentURL
+            if let basePath = folder?.path {
+                imageURLs = Self.sortPhotos(imageURLs, by: photoSort, basePath: basePath)
+            }
+            if let url = currentlySelected, let i = imageURLs.firstIndex(of: url) {
+                selectedIndex = i
+            }
+        }
+    }
 
     init() {
+        // Set backing fields directly so didSet doesn't re-write the value
+        // we just read. (didSet still fires on init; the re-write is
+        // harmless but pointless.)
         if let raw = UserDefaults.standard.string(forKey: "Latent.FolderSort"),
            let sort = FolderSort(rawValue: raw) {
-            // Set the backing field directly so didSet doesn't re-write the
-            // value we just read. (didSet still fires on init in Swift; the
-            // re-write is harmless but pointless.)
             folderSort = sort
+        }
+        if let raw = UserDefaults.standard.string(forKey: "Latent.PhotoSort"),
+           let sort = FolderSort(rawValue: raw) {
+            photoSort = sort
         }
     }
     /// Root the folder tree displays from. Set to whatever the user picked
@@ -143,6 +168,10 @@ final class AppState {
         }
         scanTask = nil
 
+        // Drop the old folder's prefetched images — the new folder's URLs
+        // share no overlap, so cached entries are pure memory waste.
+        prefetcher.clear()
+
         selectedIndex = nil
         lastError = nil
         if setAsAnchor { anchorFolder = url }
@@ -189,20 +218,16 @@ final class AppState {
         let pathBase = scanRoot.path
         let folderName = scanRoot.lastPathComponent
         let recurse = recursive
+        let sort = photoSort
         let task = Task.detached(priority: .userInitiated) { [weak self] in
-            var found = await Self.walkFolder(scanRoot, recursive: recurse) { [weak self] count in
+            let raw = await Self.walkFolder(scanRoot, recursive: recurse) { [weak self] count in
                 await MainActor.run { [weak self] in
                     self?.loadPhase = .scanning(folderName: folderName, photosFound: count)
                 }
             }
-            // Sort whatever we collected (whether scan ran to completion or
-            // the user hit Stop). localizedStandardCompare on 10k+ paths
-            // is heavy — keep it off main.
-            found.sort { lhs, rhs in
-                let l = lhs.path.hasPrefix(pathBase) ? String(lhs.path.dropFirst(pathBase.count)) : lhs.path
-                let r = rhs.path.hasPrefix(pathBase) ? String(rhs.path.dropFirst(pathBase.count)) : rhs.path
-                return l.localizedStandardCompare(r) == .orderedAscending
-            }
+            // Sort off-main (10k+ paths or 10k+ stat lookups for mtime is
+            // heavy enough that we never want to do it on main).
+            let found = Self.sortPhotos(raw, by: sort, basePath: pathBase)
             // One atomic main-actor commit: imageURLs gets the full sorted
             // list (or partial, if cancelled), SwiftUI does ONE ForEach diff.
             await MainActor.run { [weak self] in
@@ -256,6 +281,10 @@ final class AppState {
     /// photos found" can tick up live. Honors the calling task's
     /// cancellation: `Task.isCancelled` short-circuits the enumerator on
     /// large trees, which is how the Stop button bails out mid-walk.
+    ///
+    /// We prefetch contentModificationDate alongside isRegularFile so the
+    /// mtime-sort path doesn't pay a per-URL stat after the walk. The
+    /// resourceValues are cached on the returned URLs.
     private static func walkFolder(
         _ root: URL,
         recursive: Bool,
@@ -271,7 +300,7 @@ final class AppState {
             // scanner UI shouldn't bother flickering for it.
             let items = (try? fm.contentsOfDirectory(
                 at: root,
-                includingPropertiesForKeys: [.isRegularFileKey],
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
                 options: [.skipsHiddenFiles]
             )) ?? []
             for url in items {
@@ -291,7 +320,7 @@ final class AppState {
         // Stop be responsive even on huge trees.
         guard let enumerator = fm.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
 
@@ -317,21 +346,40 @@ final class AppState {
         return found
     }
 
-    /// File-watcher rescan path. Honors the load's recursive flag so a
-    /// non-recursive folder doesn't trigger a full-tree walk on every fs
-    /// event. Cancellable: the watcher cancels an in-flight rescan when a
-    /// new event fires, so rapid-fire events coalesce.
-    private static func walkAndSort(_ root: URL, recursive: Bool) async -> [URL] {
-        let basePath = root.path
-        return await Task.detached(priority: .utility) {
-            var all = await walkFolder(root, recursive: recursive)
-            if Task.isCancelled { return all }
-            all.sort { lhs, rhs in
+    /// Sort image URLs by the user's chosen order. Path-relative comparison
+    /// for name-asc; cached `contentModificationDate` for modified-desc
+    /// (cached because walkFolder prefetched the value, so reading it back
+    /// is free). Pure function — runs on whatever task the caller is on.
+    nonisolated static func sortPhotos(_ urls: [URL], by sort: FolderSort, basePath: String) -> [URL] {
+        switch sort {
+        case .nameAscending:
+            return urls.sorted { lhs, rhs in
                 let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
                 let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
                 return l.localizedStandardCompare(r) == .orderedAscending
             }
-            return all
+        case .modifiedDescending:
+            // Compute mtime once per URL into a side array, then sort the
+            // pairs. Reading resourceValues inside the comparator would
+            // hit it O(N log N) times even with caching.
+            let withMtime = urls.map { url -> (URL, Date) in
+                let m = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return (url, m)
+            }
+            return withMtime.sorted { $0.1 > $1.1 }.map { $0.0 }
+        }
+    }
+
+    /// File-watcher rescan path. Honors the load's recursive flag so a
+    /// non-recursive folder doesn't trigger a full-tree walk on every fs
+    /// event. Cancellable: the watcher cancels an in-flight rescan when a
+    /// new event fires, so rapid-fire events coalesce.
+    private static func walkAndSort(_ root: URL, recursive: Bool, sort: FolderSort) async -> [URL] {
+        let basePath = root.path
+        return await Task.detached(priority: .utility) {
+            let all = await walkFolder(root, recursive: recursive)
+            if Task.isCancelled { return all }
+            return Self.sortPhotos(all, by: sort, basePath: basePath)
         }.value
     }
 
@@ -362,8 +410,9 @@ final class AppState {
                 idx < self.imageURLs.count ? self.imageURLs[idx] : nil
             }
             let recursive = self.loadedRecursively
+            let sort = self.photoSort
             self.watcherRescanTask = Task { @MainActor [weak self] in
-                let urls = await Self.walkAndSort(url, recursive: recursive)
+                let urls = await Self.walkAndSort(url, recursive: recursive, sort: sort)
                 guard let self else { return }
                 if Task.isCancelled { return }
                 self.imageURLs = urls
@@ -425,6 +474,10 @@ final class AppState {
             lastError = "Couldn't move \(url.lastPathComponent) to Trash: \(error.localizedDescription)"
             return
         }
+        // Drop the trashed image from the prefetch cache so it doesn't
+        // hang around in memory or get re-prefetched on the next window
+        // update.
+        prefetcher.evict(url: url)
         guard let i = imageURLs.firstIndex(of: url) else { return }
         imageURLs.remove(at: i)
         // Keep selection on a sensible neighbor so the user can keep
@@ -450,52 +503,44 @@ final class AppState {
         trashImage(at: imageURLs[i])
     }
 
-    /// Move a whole folder to the Trash. The actual `trashItem` call hops
-    /// to a background task — under the hood it talks to NSFileCoordinator
-    /// + the Finder XPC service for the trash sound/animation, and on
-    /// folders that block was hanging the app for seconds. Once the syscall
-    /// returns, we apply consequences on main: close the album if the
-    /// trashed folder was active, drop it from recents, prune any photos
-    /// that lived inside it from imageURLs, and signal the folder tree to
-    /// splice the dead node out (targeted DFS, not a recursive re-stat).
+    /// Move a whole folder to the Trash. UI flow is optimistic: every
+    /// visible-state mutation happens synchronously here on main, BEFORE
+    /// `trashItem` runs, so the folder visibly disappears the instant the
+    /// menu item is clicked. The actual `trashItem` syscall (which on big
+    /// folders can take seconds — Finder XPC call for the trash sound +
+    /// folder size accounting) is fire-and-forget on a background task.
+    /// On failure we surface the error and the user can refresh; the
+    /// alternative (block until trashItem returns, then update UI) was
+    /// what made folder delete feel hung.
     func trashFolder(at url: URL) {
+        // Optimistic UI updates — all sync on main:
+        if url == folder { closeFolder() }
+        recents.remove(url)
+
+        // Optimistic prune of imageURLs.
+        let trashedPath = url.path
+        let prefix = trashedPath.hasSuffix("/") ? trashedPath : trashedPath + "/"
+        let beforeCount = imageURLs.count
+        imageURLs.removeAll { $0.path.hasPrefix(prefix) }
+        if imageURLs.count != beforeCount, let sel = selectedIndex {
+            selectedIndex = imageURLs.isEmpty ? nil : min(sel, imageURLs.count - 1)
+        }
+
+        // Tell the folder tree which URL to drop (single DFS splice).
+        lastRemovedFolder = url
+        folderTreeChangeTick &+= 1
+
+        // Now do the actual filesystem trashItem on a background task. If
+        // it fails, surface the error on main; the UI is already cleaned
+        // up so we just leave it that way (the user can hit refresh if
+        // they think the folder is still there).
         Task.detached(priority: .userInitiated) { [weak self] in
-            let trashError: Error?
             do {
                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                trashError = nil
             } catch {
-                trashError = error
-            }
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                if let trashError {
-                    self.lastError = "Couldn't move folder to Trash: \(trashError.localizedDescription)"
-                    return
+                await MainActor.run { [weak self] in
+                    self?.lastError = "Couldn't move folder to Trash: \(error.localizedDescription)"
                 }
-                if url == self.folder { self.closeFolder() }
-                self.recents.remove(url)
-
-                // Optimistic prune: anything inside the trashed folder is
-                // gone, drop it from the photo list right away. The file
-                // watcher will rescan and arrive at the same answer
-                // moments later, but the user gets immediate feedback.
-                let trashedPath = url.path
-                let prefix = trashedPath.hasSuffix("/") ? trashedPath : trashedPath + "/"
-                let beforeCount = self.imageURLs.count
-                self.imageURLs.removeAll { $0.path.hasPrefix(prefix) }
-                if self.imageURLs.count != beforeCount, let sel = self.selectedIndex {
-                    self.selectedIndex = self.imageURLs.isEmpty
-                        ? nil
-                        : min(sel, self.imageURLs.count - 1)
-                }
-
-                // Tell the folder tree which URL to drop. The listener does
-                // a single DFS to splice the node out — no per-node fs
-                // re-stat (which on a deeply-expanded tree was the other
-                // hang vector).
-                self.lastRemovedFolder = url
-                self.folderTreeChangeTick &+= 1
             }
         }
     }
@@ -513,6 +558,10 @@ final class AppState {
             try? FileManager.default.removeItem(at: prev)
             extractedArchiveDir = nil
         }
+        // The prefetch cache is folder-scoped — clear it so the new
+        // (empty) state isn't holding ~480MB of decoded images that the
+        // user can't see.
+        prefetcher.clear()
         folder = nil
         anchorFolder = nil
         imageURLs = []
