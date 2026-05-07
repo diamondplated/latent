@@ -68,7 +68,12 @@ struct EmptyStateView: View {
             .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { state.recents.refreshExistence() }
+        .onAppear {
+            // Re-check existence in the background each time the empty
+            // state surfaces (folders may have been moved while a folder
+            // was open).
+            Task { await state.recents.refreshExistence() }
+        }
     }
 
     private var hero: some View {
