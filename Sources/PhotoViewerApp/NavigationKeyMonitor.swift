@@ -39,22 +39,29 @@ final class NavigationKeyMonitor {
     }
 
     /// Returns nil to swallow the event, original event to let it propagate.
+    ///
+    /// Strategy: only own the keys when a folder is actively loaded. In the
+    /// empty-state / Recents view there's no photo to advance, so the keys
+    /// belong to the system. This is the simplest gate that avoids the
+    /// "inconsistent after Open" trap we kept hitting:
+    ///   - Open dialog dismisses → firstResponder briefly points at the
+    ///     dialog's field-editor (an NSTextView shared across windows).
+    ///   - Earlier "bail when responder is NSText/NSTextView" matched this
+    ///     and let the first arrow/space press through.
+    ///   - Now we don't care about responder type at all once a folder is
+    ///     loaded — the only thing arrow/space can mean in viewer mode is
+    ///     "navigate".
+    ///
+    /// Modal panels (Open, Save) still bail unconditionally so the user can
+    /// arrow-key around the sidebar.
     private func handle(event: NSEvent, state: AppState) -> NSEvent? {
-        // The previous version bailed when firstResponder was any NSText
-        // subclass — but NSOpenPanel has hidden text fields whose responder
-        // chain stuck around briefly after dismissal, eating our arrows
-        // intermittently. Switched to a coarser but more reliable check:
-        // ignore events targeting NSPanel windows (modal sheets, save/open
-        // dialogs all subclass it). The main viewer window is a plain
-        // NSWindow, so it gets through.
+        // Modal sheets / Open / Save dialogs keep their own keyboard semantics.
         if event.window is NSPanel { return event }
 
-        // Genuinely-focused text editing (NSTextView only — not the parent
-        // NSText, which catches too much): let cursor-movement keys through.
-        if let responder = event.window?.firstResponder,
-           responder.isKind(of: NSTextView.self) {
-            return event
-        }
+        // No folder loaded → not our keys to claim. The empty-state UI has
+        // a Recents list whose tap targets are buttons (arrows don't move
+        // through them anyway), but better not to mess with it.
+        guard state.folder != nil else { return event }
 
         // Modifier-laden arrow keys (cmd-left for window-back, etc.) are not
         // ours to claim.
