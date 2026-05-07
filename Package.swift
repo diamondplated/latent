@@ -12,6 +12,8 @@ let package = Package(
         .library(name: "PhotoIO", targets: ["PhotoIO"]),
         .library(name: "PhotoML", targets: ["PhotoML"]),
         .library(name: "PhotoSearch", targets: ["PhotoSearch"]),
+        .library(name: "PhotoViewerCore", targets: ["PhotoViewerCore"]),
+        .library(name: "PhotoGeo", targets: ["PhotoGeo"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
         .executable(name: "PhotoViewerApp", targets: ["PhotoViewerApp"]),
     ],
@@ -40,14 +42,24 @@ let package = Package(
             dependencies: ["PipelineCore", "PhotoIO", "PhotoML"],
             path: "Sources/PhotoSearch"
         ),
+        .target(
+            name: "PhotoViewerCore",
+            dependencies: [],
+            path: "Sources/PhotoViewerCore"
+        ),
+        .target(
+            name: "PhotoGeo",
+            dependencies: ["PipelineCore", "PhotoIO"],
+            path: "Sources/PhotoGeo"
+        ),
         .executableTarget(
             name: "PipelineCLI",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch", "PhotoViewerCore", "PhotoGeo"],
             path: "Sources/PipelineCLI"
         ),
         .executableTarget(
             name: "PhotoViewerApp",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoViewerCore", "PhotoGeo"],
             path: "Sources/PhotoViewerApp"
         ),
         .testTarget(
