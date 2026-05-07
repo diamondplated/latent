@@ -206,6 +206,11 @@ struct DetailView: View {
     private func paneView(image: NSImage?, label: String?) -> some View {
         ZStack {
             if let nsImage = image {
+                // Note: deliberately NO transition / animation on the image
+                // swap. Cross-fading the old NSImage out while the new one
+                // fades in produced "phantom shadow" double-exposures during
+                // arrow-key nav. Instant swap is faster, sharper, more like
+                // Preview.app's behavior.
                 Image(nsImage: nsImage)
                     .resizable()
                     .interpolation(.high)
@@ -214,7 +219,9 @@ struct DetailView: View {
                     .scaleEffect(zoom * transientZoom)
                     .offset(x: pan.width + transientPan.width,
                             y: pan.height + transientPan.height)
-                    .transition(.opacity)
+                    .id(nsImage)  // force view identity reset on swap so
+                                  // SwiftUI doesn't try to morph the old
+                                  // Image into the new one's frame
             } else if currentURL == nil {
                 Text("Select a photo")
                     .foregroundStyle(.secondary)
@@ -222,7 +229,6 @@ struct DetailView: View {
                 PhotoSkeleton()
             }
         }
-        .animation(.easeOut(duration: 0.15), value: image)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .overlay(alignment: .topLeading) {

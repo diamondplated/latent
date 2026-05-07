@@ -151,13 +151,15 @@ final class EnhancementState {
         pipelineTask?.cancel()
         pipelineTask = nil
 
+        // KEY: do NOT nil the previous photo's NSImages here. Keep showing
+        // the last image while the new one decodes. When the new preview
+        // lands the swap is instant, no skeleton flash, no fade-from-black.
+        // Buffers are nilled because `runPipeline` would otherwise try to
+        // re-process the OLD buffer with the new params.
         currentURL = url
         originalBuffer = nil
         enhancedBuffer = nil
         originalMetadata = nil
-        originalNSImage = nil
-        enhancedNSImage = nil
-        previewNSImage = nil
         lastError = nil
 
         // Phase 1: fast preview. ImageIO's NSImage init handles EXIF
@@ -178,10 +180,15 @@ final class EnhancementState {
             }
         }.value
 
-        // Apply the preview first so the UI updates immediately.
+        // Apply the preview first so the UI swaps to the new photo
+        // immediately. Same-step nil out the cached NSImages of the
+        // previous photo so we don't keep displaying stale content if
+        // the preview decode took longer than a vsync.
         let preview = await previewTask
         if myGen == loadGeneration {
             previewNSImage = preview
+            originalNSImage = nil
+            enhancedNSImage = nil
         }
 
         // Then wait for the full buffer.

@@ -142,7 +142,13 @@ struct BrowserView: View {
                     columns: [GridItem(.adaptive(minimum: thumbnailSize), spacing: 8)],
                     spacing: 8
                 ) {
-                    ForEach(Array(state.imageURLs.enumerated()), id: \.element) { idx, url in
+                    // Iterate over indices instead of Array(enumerated()) —
+                    // the latter allocates a fresh [(Int, URL)] every render,
+                    // which on a 2000+-item folder shows up in profiles.
+                    // Indices avoid the alloc and are also cheaper for
+                    // SwiftUI's id resolution.
+                    ForEach(state.imageURLs.indices, id: \.self) { idx in
+                        let url = state.imageURLs[idx]
                         ThumbnailCell(
                             url: url,
                             isSelected: state.selectedIndex == idx,
