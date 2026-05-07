@@ -45,20 +45,45 @@ struct DetailView: View {
     /// depending on `enhanceState.displayMode`. Zoom/pan applies uniformly
     /// across whichever panes are visible.
     private var imagePane: some View {
-        ZStack {
-            Color.black
-            content
+        // GeometryReader so the double-click handler knows the pane's size
+        // (needed to convert the click point into a zoom-target offset).
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                content
+            }
+            .overlay(alignment: .topLeading) { infoBar }
+            .overlay(alignment: .bottomTrailing) { positionBadge }
+            .overlay(alignment: .topTrailing) { showingOriginalBadge }
+            .overlay(alignment: .bottom) { zoomHint }
+            .gesture(panGesture)
+            .gesture(magnifyGesture)
+            // Double-tap on a specific point: zoom in 4× centered on that
+            // point. If already zoomed, second double-tap resets to fit.
+            // Mirrors Photos.app / Preview behavior.
+            .onTapGesture(count: 2, coordinateSpace: .local) { location in
+                handleDoubleTap(at: location, paneSize: geo.size)
+            }
         }
-        .overlay(alignment: .topLeading) { infoBar }
-        .overlay(alignment: .bottomTrailing) { positionBadge }
-        .overlay(alignment: .topTrailing) { showingOriginalBadge }
-        .overlay(alignment: .bottom) { zoomHint }
-        .gesture(panGesture)
-        .gesture(magnifyGesture)
-        .onTapGesture(count: 2) {
-            withAnimation(.spring(duration: 0.25)) {
+    }
+
+    /// Math: SwiftUI's `.scaleEffect(z)` scales the inner view around its
+    /// center. For a point at `loc` to land at the pane's center after
+    /// scaling, we offset by `-(z-1) * (loc - paneCenter)`.
+    private func handleDoubleTap(at location: CGPoint, paneSize: CGSize) {
+        withAnimation(.spring(duration: 0.28)) {
+            let alreadyZoomed = abs(zoom - 1.0) > 0.01
+            if alreadyZoomed {
+                // Toggle off — fit-to-window
                 zoom = 1.0
                 pan = .zero
+            } else {
+                let target: CGFloat = 4.0
+                let center = CGPoint(x: paneSize.width / 2, y: paneSize.height / 2)
+                let dx = (center.x - location.x) * (target - 1)
+                let dy = (center.y - location.y) * (target - 1)
+                zoom = target
+                pan = CGSize(width: dx, height: dy)
             }
         }
     }
