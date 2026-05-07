@@ -47,30 +47,47 @@ struct BrowserView: View {
                 photoCounter
             }
         }
-        // Folder switch hooks: load saved vim state, kick off GPS extraction.
+        // Folder switch hooks.
         .onChange(of: state.folder) { _, newFolder in
             if let folder = newFolder {
                 if let loaded = try? VimKeymap.load(folder: folder) {
                     vimKeymap = loaded
                 }
             }
+            // Forget GPS cache for the previous folder. We'll lazy-rebuild
+            // when the user actually opens the map view.
+            locationCache.reset()
         }
-        .onChange(of: state.imageURLs) { _, newURLs in
-            Task { await locationCache.locate(newURLs) }
+        // GPS extraction is the single biggest cost in the load path
+        // (header reads on every photo) — only kick it off when the user
+        // actually wants the map view, not on every folder open.
+        .onChange(of: mode) { _, newMode in
+            if newMode == .map { Task { await locationCache.locate(state.imageURLs) } }
+        }
+        // If the user opens a folder while ALREADY in map mode, fire the
+        // first GPS pass once the scan settles. Watch isLoading rather than
+        // imageURLs so we don't re-fire per batch.
+        .onChange(of: state.isLoading) { _, nowLoading in
+            if !nowLoading, mode == .map {
+                Task { await locationCache.locate(state.imageURLs) }
+            }
         }
     }
 
     @ViewBuilder
     private var sidebar: some View {
         ZStack {
-            switch mode {
-            case .grid:  thumbnailGrid
-            case .map:   mapView
-            }
-            // Loading overlay: covers the sidebar while a folder/archive is
-            // being processed. Sits inside the sidebar so the detail pane
-            // (with its own state) doesn't get blocked.
-            if state.isLoading {
+            // Don't render the actual grid / map while scanning. SwiftUI
+            // would otherwise diff a ForEach over a 1000-item array on
+            // every batch update from the streaming scan, which spikes the
+            // main thread (rainbow spinner). Show only the loading scene
+            // until the scan settles.
+            if !state.isLoading {
+                switch mode {
+                case .grid: thumbnailGrid
+                case .map:  mapView
+                }
+            } else {
                 loadingOverlay
             }
         }
