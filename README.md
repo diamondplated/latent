@@ -1,4 +1,4 @@
-# photo-viewer
+# Latent
 
 A Mac-native photo viewer focused on speed, folder-based browsing, and best-in-class **local** AI enhancement. No cloud calls, no library import, no subscription.
 
@@ -39,13 +39,27 @@ What's stubbed:
 
 ```bash
 swift build
-swift run pv-pipeline                  # run the verifier (27 checks)
-swift run PhotoViewerApp               # launch the viewer from the package binary
+swift run pv-pipeline                  # run the verifier
+swift run Latent                       # launch the viewer from the package binary
 
-# Build a real .app bundle (registers as a viewer for image types):
+# Build a real .app bundle:
+swift scripts/generate_icon.swift      # render the app icon (one-time)
 ./scripts/build_app.sh
-open build/PhotoViewerApp.app
+open build/Latent.app
 ```
+
+### Opening folders
+
+- **Drag a folder onto `Latent.app`** (Dock icon or Finder icon) — opens it.
+- **Terminal:** `open -a Latent /path/to/folder`
+- **From inside Latent:** Cmd-O / "Open Folder…"
+- **Right-click an *image* in Finder → Open With → Latent** — opens the
+  parent folder and selects that image. Works because `public.jpeg` etc.
+  are registered. **Folders themselves don't show "Open With" in the
+  standard Finder context menu — that's an Apple OS-level restriction**,
+  not something `Info.plist` alone can fix. The drag-drop and
+  command-line paths above are the workarounds; a proper "Open in
+  Latent" Finder extension would need a separate Xcode-only target.
 
 Expected output:
 

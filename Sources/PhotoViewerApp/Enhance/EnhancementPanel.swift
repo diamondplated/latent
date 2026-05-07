@@ -151,6 +151,9 @@ struct EnhancementPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             // Compare-mode picker: enhanced / original / side-by-side. Hold
             // B at any time to flash the original on top of any of these.
+            // Switching away from .original kicks off the heavy decode +
+            // pipeline run if not already done — that's how we keep nav
+            // fast in the default case.
             Picker("View", selection: $state.compareMode) {
                 ForEach(CompareMode.allCases) { mode in
                     Label(mode.label, systemImage: mode.symbol).tag(mode)
@@ -158,6 +161,11 @@ struct EnhancementPanel: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .onChange(of: state.compareMode) { _, newMode in
+                if newMode != .original {
+                    state.ensureEnhancedAvailable()
+                }
+            }
 
             HStack(spacing: 8) {
                 Button {
@@ -168,7 +176,10 @@ struct EnhancementPanel: View {
                 }
                 .controlSize(.large)
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(state.currentURL == nil || state.originalBuffer == nil)
+                // Enabled as soon as a photo is selected — the save path
+                // lazy-loads the buffer if we haven't done the heavy decode
+                // yet (default browsing case).
+                .disabled(state.currentURL == nil)
             }
 
             statusRow

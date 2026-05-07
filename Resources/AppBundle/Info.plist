@@ -8,6 +8,12 @@
     <key>CFBundleExecutable</key>
     <string>Latent</string>
 
+    <key>CFBundleIconFile</key>
+    <string>Latent</string>
+
+    <key>CFBundleIconName</key>
+    <string>Latent</string>
+
     <key>CFBundleIdentifier</key>
     <string>com.diamondplated.latent</string>
 
@@ -43,6 +49,19 @@
 
     <key>CFBundleDocumentTypes</key>
     <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.folder</string>
+                <string>public.directory</string>
+            </array>
+        </dict>
         <dict>
             <key>CFBundleTypeName</key>
             <string>Image</string>
