@@ -1,0 +1,8 @@
+# Pinned to versions that are known to work with the conversion script.
+# coremltools 8.x supports macOS 14+ deployment target and FP16 compute precision.
+# basicsr provides the RRDBNet architecture used by Real-ESRGAN.
+
+torch==2.4.1
+coremltools==8.0
+basicsr==1.4.2
+numpy<2.0
