@@ -5,4 +5,5 @@
 torch==2.4.1
 coremltools==8.0
 basicsr==1.4.2
+open_clip_torch==2.24.0
 numpy<2.0

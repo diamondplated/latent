@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "EnhancementStages", targets: ["EnhancementStages"]),
         .library(name: "PhotoIO", targets: ["PhotoIO"]),
         .library(name: "PhotoML", targets: ["PhotoML"]),
+        .library(name: "PhotoSearch", targets: ["PhotoSearch"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
     ],
     targets: [
@@ -33,14 +34,19 @@ let package = Package(
             dependencies: ["PipelineCore"],
             path: "Sources/PhotoML"
         ),
+        .target(
+            name: "PhotoSearch",
+            dependencies: ["PipelineCore", "PhotoIO", "PhotoML"],
+            path: "Sources/PhotoSearch"
+        ),
         .executableTarget(
             name: "PipelineCLI",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch"],
             path: "Sources/PipelineCLI"
         ),
         .testTarget(
             name: "PipelineCoreTests",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch"],
             path: "Tests/PipelineCoreTests"
         ),
     ]

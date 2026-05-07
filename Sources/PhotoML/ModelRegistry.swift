@@ -8,6 +8,8 @@ public enum ModelID: String, Sendable, CaseIterable {
     case denoiseNAFNet = "denoise-nafnet"
     case faceRestoreGFPGAN = "face-restore-gfpgan"
     case artifactRemovalFBCNN = "artifact-removal-fbcnn"
+    case openCLIPImageEncoder = "openclip-vitb32-image"
+    case openCLIPTextEncoder = "openclip-vitb32-text"
 }
 
 /// Where the registry looks for models. In dev / open-source, models live in
