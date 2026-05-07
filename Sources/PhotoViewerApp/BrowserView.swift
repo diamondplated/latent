@@ -52,6 +52,19 @@ struct BrowserView: View {
                 .help(state.showFolderTree ? "Hide folder tree" : "Show folder tree")
                 .keyboardShortcut("l", modifiers: .command)
             }
+            // Cmd-Up jumps to the parent dir, Finder-style. Re-roots the
+            // folder tree on the parent so you can drill back down a
+            // sibling. Disabled at filesystem root.
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    state.goUp()
+                } label: {
+                    Image(systemName: "arrow.up")
+                }
+                .help("Go to parent folder (\u{2318}\u{2191})")
+                .keyboardShortcut(.upArrow, modifiers: .command)
+                .disabled(!state.canGoUp || state.isLoading)
+            }
             // Opt-in recursive scan. The default load is non-recursive
             // (just the folder's direct contents) — a parent of ~/Pictures
             // used to spawn a 100k-photo scan the user didn't ask for.

@@ -90,18 +90,34 @@ final class FolderNode: Identifiable, Hashable {
         }
     }
 
-    /// Re-stat this node and any descendants whose children we'd already
-    /// loaded. Used after a folder trash so the tree drops the dead row
-    /// (and any of its still-cached subtrees) without forcing the user to
-    /// hit the refresh button. Only descends into nodes we already
-    /// expanded — collapsed branches stay lazy.
-    func recursiveRefresh() {
-        refreshChildren()
+    /// Splice a single descendant out by URL — used after a folder trash.
+    /// Single DFS through whatever children we've already loaded; finds
+    /// the matching node and removes it from its parent's array. Returns
+    /// true if the URL was found and removed.
+    ///
+    /// This replaces the previous `recursiveRefresh()` approach. That one
+    /// re-stated every loaded folder via `contentsOfDirectory` on main —
+    /// for a deeply-expanded tree that was dozens of fs syscalls in
+    /// sequence, hanging the app for seconds after every trash. Targeted
+    /// removal does no fs work at all; it just walks the in-memory tree.
+    @discardableResult
+    func removeNode(withURL target: URL) -> Bool {
+        // Direct child? Splice it out and we're done — the trashed
+        // folder's own subtree (if loaded) gets garbage-collected with it.
+        if let kids = children, let idx = kids.firstIndex(where: { $0.url == target }) {
+            children?.remove(at: idx)
+            return true
+        }
+        // Recurse into loaded subtrees only. Collapsed/unloaded branches
+        // can't possibly contain the row the user just right-clicked
+        // (clicking required walking through the parent), so this DFS is
+        // bounded by what the user has actually expanded.
         if let kids = children {
-            for k in kids where k.isLoaded {
-                k.recursiveRefresh()
+            for k in kids {
+                if k.removeNode(withURL: target) { return true }
             }
         }
+        return false
     }
 
     /// Drop common noise — Photos library packages, version-control dirs,
@@ -160,11 +176,18 @@ struct FolderTreeView: View {
         .onChange(of: state.anchorFolder) { _, new in
             rebuildTree(for: new)
         }
-        // After a folder is trashed (from this tree's right-click → Move
-        // to Trash), AppState bumps `folderTreeChangeTick`. Walk every
-        // already-loaded subtree to drop the dead row + its descendants.
+        // After a folder is trashed, AppState bumps `folderTreeChangeTick`
+        // and stashes the URL in `lastRemovedFolder`. Splice that one node
+        // out of the in-memory tree. No fs walks, no per-node restats —
+        // the previous recursive-refresh pass was hanging the app for
+        // seconds on deeply-expanded trees.
         .onChange(of: state.folderTreeChangeTick) { _, _ in
-            rootNode?.recursiveRefresh()
+            guard let removed = state.lastRemovedFolder else { return }
+            // If the trashed folder WAS the tree's root, closeFolder()
+            // has already nilled anchorFolder and the anchor handler
+            // resets the tree. Targeted removal can't help us here.
+            if rootNode?.url == removed { return }
+            rootNode?.removeNode(withURL: removed)
         }
         .onAppear { rebuildTree(for: state.anchorFolder) }
     }
