@@ -72,6 +72,38 @@ public struct TensorSpec: Sendable {
         layout: .nchw,
         inputRange: (0, 1)
     )
+
+    /// NAFNet denoise default spec. Matches the standard basicsr-trained
+    /// NAFNet weights converted via the bundled scripts/convert_nafnet.py.
+    public static let nafnet = TensorSpec(
+        inputName: "input",
+        outputName: "output",
+        channelOrder: .rgb,
+        dataType: .float32,
+        layout: .nchw,
+        inputRange: (0, 1)
+    )
+
+    /// FBCNN artifact-removal default spec. Single-channel quality factor
+    /// input is supplied internally; the model's image input is RGB NCHW.
+    public static let fbcnn = TensorSpec(
+        inputName: "input",
+        outputName: "output",
+        channelOrder: .rgb,
+        dataType: .float32,
+        layout: .nchw,
+        inputRange: (0, 1)
+    )
+
+    /// GFPGAN face-restore default spec. Operates on 512×512 face crops.
+    public static let gfpgan = TensorSpec(
+        inputName: "input",
+        outputName: "output",
+        channelOrder: .rgb,
+        dataType: .float32,
+        layout: .nchw,
+        inputRange: (-1, 1)  // GFPGAN normalizes to [-1, 1] internally
+    )
 }
 
 /// Image-to-image CoreML model wrapper. Loads an `.mlpackage` (or compiled
