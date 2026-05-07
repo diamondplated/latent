@@ -33,6 +33,16 @@ struct ContentView: View {
         .onOpenURL { url in
             Task { await openExternal(url: url) }
         }
+        // Drag a folder, archive, or image from Finder onto the Latent
+        // window → open it. Same routing logic as Open With (openExternal
+        // handles directories vs files vs archives transparently). Works
+        // both from the empty state and while a folder is already loaded
+        // (drop replaces the current view).
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let first = urls.first else { return false }
+            Task { await openExternal(url: first) }
+            return true
+        }
     }
 
     @MainActor
@@ -58,6 +68,8 @@ struct EmptyStateView: View {
         ScrollView {
             VStack(spacing: 16) {
                 hero
+                quickAccess
+                    .padding(.top, 16)
                 if !state.recents.entries.isEmpty {
                     recentsList
                         .padding(.top, 24)
@@ -93,6 +105,30 @@ struct EmptyStateView: View {
         }
     }
 
+    /// Pinned shortcuts. Currently just "Screenshots" — opens whatever
+    /// folder ⌘⇧5 saves to (Desktop by default). Triaging the screenshot
+    /// pile is the most-frequent "I have a folder of images and need to
+    /// browse / trash / share them" workflow on a Mac.
+    private var quickAccess: some View {
+        HStack(spacing: 10) {
+            QuickAccessTile(
+                symbol: "camera.viewfinder",
+                title: "Screenshots",
+                subtitle: prettyScreenshotsLocation()
+            ) {
+                Task { await state.loadFolder(AppState.screenshotsFolderURL) }
+            }
+        }
+    }
+
+    /// "~/Desktop" rather than "/Users/andrew/Desktop" for the subtitle.
+    private func prettyScreenshotsLocation() -> String {
+        let path = AppState.screenshotsFolderURL.path
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+
     private var recentsList: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -116,6 +152,56 @@ struct EmptyStateView: View {
                 }
             }
         }
+    }
+}
+
+/// Quick-access tile shown above the Recents in the empty state. Visual
+/// cousin to RecentRow but pinned/curated rather than MRU. Clicking
+/// invokes the action (typically `loadFolder` on a system path).
+struct QuickAccessTile: View {
+    let symbol: String
+    let title: String
+    let subtitle: String
+    let onOpen: () -> Void
+
+    @State private var hovered: Bool = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(hovered ? Color.secondary.opacity(0.10) : Color.secondary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.secondary.opacity(0.15), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
     }
 }
 
