@@ -226,9 +226,9 @@ struct BrowserView: View {
         .disabled(state.imageURLs.isEmpty || state.isLoading)
     }
 
-    /// Toolbar counter: "i / N" when a photo is selected, "N photos" if
-    /// nothing is selected, or "Scanning…" while loading. Compact monospace
-    /// so it doesn't bounce around as numbers grow.
+    /// Toolbar counter. Three modes: scan progress, multi-select badge,
+    /// or "i / N" position. Multi-select wins when active so the user
+    /// always knows how many they've gathered.
     private var photoCounter: some View {
         Group {
             if state.isLoading {
@@ -238,6 +238,18 @@ struct BrowserView: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
+            } else if !state.multiSelection.isEmpty {
+                // Bulk-mode pill: pops with accent color so the user
+                // can't miss that they're in a non-default state and
+                // remembers Backspace will trash all of them.
+                let n = state.multiSelection.count
+                Text("\(n) selected")
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.accentColor))
             } else if !state.imageURLs.isEmpty {
                 let total = state.imageURLs.count
                 if let i = state.selectedIndex {
@@ -273,6 +285,7 @@ struct BrowserView: View {
                         ThumbnailCell(
                             url: url,
                             isSelected: state.selectedIndex == idx,
+                            isMultiSelected: state.multiSelection.contains(url),
                             colorLabel: vimKeymap.colorLabel(for: url),
                             isPicked: vimKeymap.isPicked(url),
                             isRejected: vimKeymap.isRejected(url),
@@ -280,7 +293,22 @@ struct BrowserView: View {
                             onTrash: { state.trashImage(at: url) }
                         )
                         .id(idx)
+                        // ⌘-click → toggle this URL in the multi-selection
+                        .gesture(
+                            TapGesture()
+                                .modifiers(.command)
+                                .onEnded { _ in toggleMultiSelect(idx: idx) }
+                        )
+                        // Shift-click → range select from selectedIndex
+                        // anchor through this idx (inclusive)
+                        .gesture(
+                            TapGesture()
+                                .modifiers(.shift)
+                                .onEnded { _ in extendMultiSelect(toIdx: idx) }
+                        )
+                        // Plain click → clear multi, set primary
                         .onTapGesture {
+                            state.multiSelection.removeAll()
                             state.selectedIndex = idx
                         }
                     }
@@ -293,6 +321,35 @@ struct BrowserView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Multi-selection
+
+    /// Toggle a single thumbnail in the multi-selection (⌘-click handler).
+    /// Also makes this idx the primary so subsequent shift-clicks anchor
+    /// from here.
+    private func toggleMultiSelect(idx: Int) {
+        guard idx < state.imageURLs.count else { return }
+        let url = state.imageURLs[idx]
+        if state.multiSelection.contains(url) {
+            state.multiSelection.remove(url)
+        } else {
+            state.multiSelection.insert(url)
+        }
+        state.selectedIndex = idx
+    }
+
+    /// Range-select from the current primary (selectedIndex) through the
+    /// clicked idx. Replaces the current multi-selection (Mac shift-click
+    /// is "select range from anchor"; ⌘-shift-click would be "add range",
+    /// but the simpler semantics are good enough for v1).
+    private func extendMultiSelect(toIdx idx: Int) {
+        guard idx < state.imageURLs.count else { return }
+        let anchor = state.selectedIndex ?? idx
+        let lo = min(anchor, idx)
+        let hi = max(anchor, idx)
+        state.multiSelection = Set(state.imageURLs[lo...hi])
+        state.selectedIndex = idx
     }
 
     // MARK: - Map
@@ -386,6 +443,10 @@ struct BrowserView: View {
 struct ThumbnailCell: View {
     let url: URL
     let isSelected: Bool
+    /// In the multi-selection set. Distinct from `isSelected` (which is
+    /// the *primary* focus that DetailView shows). A thumbnail can be
+    /// both at once — it's the most-recently-clicked AND part of a bulk.
+    let isMultiSelected: Bool
     let colorLabel: Int
     let isPicked: Bool
     let isRejected: Bool
@@ -409,13 +470,26 @@ struct ThumbnailCell: View {
                     .fill(.quaternary)
                     .overlay(ProgressView().controlSize(.small))
             }
+            // Multi-selected tint overlay. Sits ABOVE the image so it
+            // visually unifies a bulk selection at a glance (helpful when
+            // the user has 30 picked across a 5000-photo grid).
+            if isMultiSelected {
+                Color.accentColor.opacity(0.22)
+            }
         }
         .frame(width: size, height: size)
         .background(.background.tertiary)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .overlay {
+            // Border thickness encodes selection state: 3pt for primary,
+            // 2pt for "in multi-selection but not primary", clear
+            // otherwise. Picks the eye toward the primary first.
+            let lineWidth: CGFloat = isSelected ? 3 : (isMultiSelected ? 2 : 0)
             RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+                .strokeBorder(
+                    (isSelected || isMultiSelected) ? Color.accentColor : .clear,
+                    lineWidth: lineWidth
+                )
         }
         .overlay(alignment: .topLeading) {
             if colorLabel > 0 {
