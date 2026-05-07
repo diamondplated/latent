@@ -72,8 +72,11 @@ final class EnhancementState {
     private(set) var enhancedNSImage: NSImage? = nil
 
     /// User-selected comparison mode. `displayMode` adds the transient blink
-    /// override on top.
-    var compareMode: CompareMode = .enhanced
+    /// override on top. Defaults to `.original` so simply browsing photos
+    /// doesn't trigger a 2-second Lanczos+Sharpen pipeline run on every nav.
+    /// The pipeline only runs when the user explicitly switches to .enhanced
+    /// or .sideBySide (or adjusts a slider).
+    var compareMode: CompareMode = .original
     /// True while the user holds the blink key (B). Forces the original view
     /// momentarily; on release falls back to `compareMode`.
     var blinking: Bool = false
@@ -167,22 +170,17 @@ final class EnhancementState {
         originalMetadata = nil
         lastError = nil
 
-        // Phase 1: fast preview. ImageIO's NSImage init handles EXIF
-        // orientation for free and is dramatically faster than our full
-        // color-managed path. We don't need the result for the pipeline,
-        // just for instant display.
+        // Phase 1: fast full-resolution preview. Decode via CGImageSource
+        // (NOT NSImage(contentsOf:) which can lazy-load a smaller
+        // representation) and wrap with explicit native size so the display
+        // gets the actual pixels at full quality. Honors EXIF orientation
+        // via `kCGImageSourceCreateThumbnailWithTransform` on the read path.
         async let previewTask: NSImage? = Task.detached(priority: .userInitiated) {
-            return NSImage(contentsOf: url)
-        }.value
-
-        // Phase 2 (in parallel): full pipeline-ready buffer + metadata.
-        async let bufferTask: Result<(ImageBuffer, ImageMetadata), Error> = Task.detached(priority: .userInitiated) { [reader] in
-            do {
-                let pair = try reader.read(url: url)
-                return .success(pair)
-            } catch {
-                return .failure(error)
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+                return nil
             }
+            return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         }.value
 
         // Apply the preview first so the UI swaps to the new photo
@@ -196,8 +194,33 @@ final class EnhancementState {
             enhancedNSImage = nil
         }
 
-        // Then wait for the full buffer.
-        let result = await bufferTask
+        // Phase 2: full pipeline-ready buffer + metadata. Only kick this off
+        // when there's a reason to — i.e. the user is in a mode that needs
+        // the enhanced output, OR they're going to need it for Apply & Save.
+        // For the default browsing case (compareMode = .original), skip the
+        // heavy ImageReader.read() + Lanczos+Sharpen entirely so nav is free.
+        if compareMode != .original {
+            await loadFullBuffer(url: url, generation: myGen)
+        }
+    }
+
+    /// Heavy decode + pipeline run. Idempotent across repeat calls for the
+    /// same URL (the generation guard drops stale results). Called from
+    /// `loadInput` only when needed, or on-demand when the user switches to
+    /// a compare mode that requires enhanced output.
+    func loadFullBuffer(url: URL, generation myGen: UInt64) async {
+        // If we've already loaded this URL's buffer, don't redo it.
+        if originalBuffer != nil, currentURL == url { return }
+
+        let result: Result<(ImageBuffer, ImageMetadata), Error> = await Task.detached(priority: .userInitiated) { [reader] in
+            do {
+                let pair = try reader.read(url: url)
+                return .success(pair)
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
         guard myGen == loadGeneration else { return }
 
         switch result {
@@ -213,10 +236,33 @@ final class EnhancementState {
         }
     }
 
+    /// Called by the UI when the user changes compare mode. Triggers the
+    /// heavy buffer load + pipeline if we don't already have an enhanced
+    /// result for the current photo.
+    func ensureEnhancedAvailable() {
+        guard let url = currentURL else { return }
+        if enhancedBuffer == nil {
+            Task { await loadFullBuffer(url: url, generation: loadGeneration) }
+        }
+    }
+
     /// Cancel any running pipeline and start a new one with the current
     /// stage state. Safe to call from any UI binding (slider edit, toggle).
+    /// If the heavy decode hasn't run yet (lazy default), kick that off
+    /// first; the pipeline runs as a continuation when it lands.
     func runPipeline() {
-        guard let input = originalBuffer else { return }
+        guard let url = currentURL else { return }
+        guard let input = originalBuffer else {
+            // Lazy load the buffer first — runPipeline is normally chained
+            // off slider/toggle edits, so the user wants to SEE the result.
+            // ensureEnhancedAvailable does load + runPipeline once decoded.
+            ensureEnhancedAvailable()
+            // Side-effect: also flip out of .original so the panel shows the
+            // result the user is editing toward.
+            if compareMode == .original { compareMode = .enhanced }
+            _ = url  // (used implicitly via ensureEnhancedAvailable)
+            return
+        }
 
         pipelineTask?.cancel()
         let steps = buildSteps()
@@ -249,9 +295,19 @@ final class EnhancementState {
     /// source as `<stem>_enhanced.<ext>`. Overwrites if the destination
     /// already exists.
     func saveEnhanced() async {
-        guard let url = currentURL,
-              let buffer = enhancedBuffer ?? originalBuffer else {
+        guard let url = currentURL else {
             lastError = "Nothing to save."
+            return
+        }
+        // Lazy-load the heavy buffer if we don't have it yet. Apply & Save
+        // works even when the user has been browsing in .original mode.
+        if originalBuffer == nil {
+            await loadFullBuffer(url: url, generation: loadGeneration)
+            // Wait for any pipeline triggered by loadFullBuffer to complete.
+            await pipelineTask?.value
+        }
+        guard let buffer = enhancedBuffer ?? originalBuffer else {
+            lastError = "Failed to load image for save."
             return
         }
         let dest = Self.outputURL(for: url)
