@@ -267,12 +267,12 @@ struct ThumbnailCell: View {
     let isPicked: Bool
     let isRejected: Bool
     let size: CGFloat
-    @State private var image: NSImage? = nil
+    @State private var image: CGImage? = nil
 
     var body: some View {
         ZStack {
             if let image {
-                Image(nsImage: image)
+                Image(decorative: image, scale: 1.0, orientation: .up)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {

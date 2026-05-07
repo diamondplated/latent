@@ -4,28 +4,41 @@ public enum ArchiveError: Error, CustomStringConvertible {
     case unsupportedFormat(String)
     case extractionFailed(URL, Int32, String)
     case toolMissing(String)
+    /// Format requires a Homebrew-installed CLI. Includes the install command
+    /// so the UI can show a copy-pasteable hint.
+    case toolMissingHomebrew(tool: String, install: String)
 
     public var description: String {
         switch self {
         case .unsupportedFormat(let ext):
-            return "Unsupported archive format: \(ext). Supported: zip, tar, tar.gz/.tgz, tar.bz2/.tbz2, tar.xz/.txz."
+            return "Unsupported archive format: \(ext). Supported: zip, tar, tar.gz/.tgz, tar.bz2/.tbz2, tar.xz/.txz, rar, 7z."
         case .extractionFailed(let url, let code, let stderr):
             return "Extraction of \(url.lastPathComponent) failed (exit \(code)): \(stderr)"
         case .toolMissing(let tool):
             return "Required system tool not found on PATH: \(tool)"
+        case .toolMissingHomebrew(let tool, let install):
+            return """
+            \(tool) isn't installed. macOS doesn't bundle it; install via Homebrew:
+
+                \(install)
+
+            Then re-open the archive.
+            """
         }
     }
 }
 
-/// Detected archive format. Each maps to a system tool that's bundled with
-/// macOS — `unzip` and `tar` are both in `/usr/bin`. We deliberately do NOT
-/// add support for 7z/rar to avoid third-party deps.
+/// Detected archive format. zip + tar variants use macOS-bundled tools
+/// (/usr/bin/unzip, /usr/bin/tar). RAR and 7z need Homebrew-installed tools
+/// — we detect at runtime and surface a clear "install via brew" error.
 public enum ArchiveFormat: Sendable {
     case zip
     case tar
     case tarGz
     case tarBz2
     case tarXz
+    case rar
+    case sevenZip
 
     /// Detect format from the URL's extension. Looks at compound extensions
     /// like `.tar.gz` so a `Foo.tar.gz` doesn't fall back to "tar".
@@ -36,16 +49,20 @@ public enum ArchiveFormat: Sendable {
         if name.hasSuffix(".tar.bz2") || name.hasSuffix(".tbz2") || name.hasSuffix(".tbz") { return .tarBz2 }
         if name.hasSuffix(".tar.xz") || name.hasSuffix(".txz") { return .tarXz }
         if name.hasSuffix(".tar") { return .tar }
+        if name.hasSuffix(".rar") { return .rar }
+        if name.hasSuffix(".7z") { return .sevenZip }
         return nil
     }
 
     var supportedExtensions: [String] {
         switch self {
-        case .zip:    ["zip"]
-        case .tar:    ["tar"]
-        case .tarGz:  ["tar.gz", "tgz"]
-        case .tarBz2: ["tar.bz2", "tbz2", "tbz"]
-        case .tarXz:  ["tar.xz", "txz"]
+        case .zip:      ["zip"]
+        case .tar:      ["tar"]
+        case .tarGz:    ["tar.gz", "tgz"]
+        case .tarBz2:   ["tar.bz2", "tbz2", "tbz"]
+        case .tarXz:    ["tar.xz", "txz"]
+        case .rar:      ["rar"]
+        case .sevenZip: ["7z"]
         }
     }
 }
@@ -109,9 +126,72 @@ public actor ArchiveExtractor {
                 args: ["-xJf", archiveURL.path, "-C", dest.path],
                 inputArchive: archiveURL
             )
+        case .rar:
+            // unrar isn't shipped with macOS. Search Homebrew prefixes,
+            // surface a friendly error if not installed.
+            guard let unrar = Self.locate(tool: "unrar") else {
+                throw ArchiveError.toolMissingHomebrew(
+                    tool: "unrar",
+                    install: "brew install carlocab/personal/unrar  # or  brew install --cask rar"
+                )
+            }
+            // -x: extract files with full paths; -y: assume yes; -inul: silent
+            try await runProcess(tool: unrar, args: ["x", "-y", "-inul", archiveURL.path, dest.path + "/"], inputArchive: archiveURL)
+        case .sevenZip:
+            // 7zz is provided by Homebrew's `sevenzip` formula (the modern
+            // replacement for the old `p7zip`). Names: `7zz` (sevenzip) and
+            // `7z` (p7zip, deprecated). Try both.
+            guard let sevenzz = Self.locate(tool: "7zz") ?? Self.locate(tool: "7z") else {
+                throw ArchiveError.toolMissingHomebrew(
+                    tool: "7zz",
+                    install: "brew install sevenzip"
+                )
+            }
+            // x = extract with paths, -y = assume yes, -bso0 -bsp0 = silent
+            try await runProcess(tool: sevenzz, args: ["x", archiveURL.path, "-o" + dest.path, "-y", "-bso0", "-bsp0"], inputArchive: archiveURL)
         }
 
         return dest
+    }
+
+    // MARK: - Tool location
+
+    private static let homebrewSearchPaths = [
+        "/opt/homebrew/bin",        // Apple Silicon brew
+        "/usr/local/bin",           // Intel brew
+        "/opt/local/bin",           // MacPorts
+        "/usr/local/sbin",
+    ]
+
+    /// Find a Homebrew-installed CLI tool by name. Returns the absolute path
+    /// or nil if it's not on any of the standard paths.
+    public static func locate(tool: String) -> String? {
+        let fm = FileManager.default
+        for prefix in homebrewSearchPaths {
+            let candidate = "\(prefix)/\(tool)"
+            if fm.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        // Last-resort: respect the user's PATH (covers atypical install
+        // locations). Run /usr/bin/which to resolve.
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        p.arguments = [tool]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        do {
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.availableData
+                let path = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let path, fm.isExecutableFile(atPath: path) { return path }
+            }
+        } catch {
+            // ignore
+        }
+        return nil
     }
 
     /// Delete an extracted-archive directory. Errors swallowed — best effort.
