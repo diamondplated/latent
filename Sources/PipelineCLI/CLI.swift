@@ -63,6 +63,19 @@ struct PipelineCLI {
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
         failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)
         failures += await runVerification("QuickLookRenderer: rejects unsupported file extensions", check: quickLookRenderRejectsUnsupported)
+        failures += await runVerification("ArchiveExtractor: detects zip / tar / tar.gz / tar.bz2 / tar.xz from filename", check: archiveDetectsCommonFormats)
+        failures += await runVerification("ArchiveExtractor: extracts a real zip, preserving subfolder structure", check: archiveExtractRoundTripZip)
+        failures += await runVerification("ArchiveExtractor: rejects unsupported extensions", check: archiveExtractRejectsBadFormat)
+
+        // Optional: real-photo smoke test. Set PV_TEST_FOLDER=/some/path with
+        // real JPEG/HEIC/PNG to exercise the full pipeline end-to-end on
+        // disk-resident images. Skipped when the env var isn't set.
+        if let folder = ProcessInfo.processInfo.environment["PV_TEST_FOLDER"] {
+            let folderURL = URL(fileURLWithPath: folder, isDirectory: true)
+            failures += await runVerification("real-photo: every JPEG/HEIC/PNG in PV_TEST_FOLDER reads, runs pipeline, writes back, re-reads") {
+                try await realPhotoFolderRoundTrip(folder: folderURL)
+            }
+        }
 
         print()
         if failures == 0 {
