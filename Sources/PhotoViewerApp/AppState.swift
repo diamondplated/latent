@@ -95,22 +95,41 @@ final class AppState {
 
         folder = scanRoot
         loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
-        // Drain the streaming scan, appending batches as they arrive so the
-        // UI fills in live. For huge folders this is the difference between
-        // "is this stuck?" and "X photos found, scanning…"
-        imageURLs = []
-        for await batch in Self.scanFolderStream(scanRoot) {
-            imageURLs.append(contentsOf: batch)
-            loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: imageURLs.count)
-        }
-        // Final sort once the walk is done — sorting per-batch would be
-        // O(N log N) per batch and force the LazyVGrid to keep diffing.
-        let basePath = scanRoot.path
-        imageURLs.sort { lhs, rhs in
-            let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
-            let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
-            return l.localizedStandardCompare(r) == .orderedAscending
-        }
+        // Stream-collect on a background task so SwiftUI doesn't see imageURLs
+        // grow batch-by-batch (each batch update was forcing the toolbar /
+        // grid to diff a growing N-item array, multiplying main-thread work
+        // by O(batches) on huge folders). Live count comes from loadPhase
+        // alone; imageURLs is set once at the end.
+        let pathBase = scanRoot.path
+        let stream = Self.scanFolderStream(scanRoot)
+        let folderName = scanRoot.lastPathComponent
+        let collected: [URL] = await Task.detached(priority: .userInitiated) { [weak self] in
+            var found: [URL] = []
+            for await batch in stream {
+                found.append(contentsOf: batch)
+                let count = found.count
+                // Hop to the main actor only for the live count update —
+                // not the imageURLs append. This makes the loader's count
+                // tick smoothly without paying the ForEach diff cost on
+                // every batch.
+                await MainActor.run { [weak self] in
+                    self?.loadPhase = .scanning(folderName: folderName, photosFound: count)
+                }
+            }
+            // Sort happens on the same background task before we hand the
+            // array to SwiftUI. localizedStandardCompare on N=10k+ paths
+            // is the kind of work that absolutely must not be on main.
+            found.sort { lhs, rhs in
+                let l = lhs.path.hasPrefix(pathBase) ? String(lhs.path.dropFirst(pathBase.count)) : lhs.path
+                let r = rhs.path.hasPrefix(pathBase) ? String(rhs.path.dropFirst(pathBase.count)) : rhs.path
+                return l.localizedStandardCompare(r) == .orderedAscending
+            }
+            return found
+        }.value
+
+        // One atomic update: imageURLs gets the full sorted list, SwiftUI
+        // does ONE diff (against the empty starting state).
+        imageURLs = collected
         if !imageURLs.isEmpty { selectedIndex = 0 }
 
         startWatching(scanRoot)
