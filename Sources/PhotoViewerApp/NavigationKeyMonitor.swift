@@ -77,6 +77,11 @@ final class NavigationKeyMonitor {
         case 124, 125, 49: // right, down, space — all advance
             state.selectNext()
             return nil
+        case 51, 117: // delete (backspace), forward delete — trash current
+            // No-op if no photo is selected; we still swallow the event so
+            // it doesn't trigger a "boop" system beep on an empty viewer.
+            state.trashCurrentImage()
+            return nil
         case 53: // escape
             return handleEscape(state: state, event: event)
         default:

@@ -15,6 +15,11 @@ final class FolderNode: Identifiable, Hashable {
     /// Persisted across re-renders so the disclosure state survives even when
     /// the parent re-builds the tree on a folder change.
     var isExpanded: Bool = false
+    /// Image count for this folder's direct contents. `nil` = not measured
+    /// yet — populated lazily on first row appearance via `loadPhotoCountIfNeeded`.
+    /// Eager-counting at tree build time would re-stat thousands of dirs the
+    /// user may never expand.
+    private(set) var photoCount: Int?
 
     nonisolated var id: URL { url }
     nonisolated var name: String { url.lastPathComponent }
@@ -43,6 +48,28 @@ final class FolderNode: Identifiable, Hashable {
             .map { FolderNode(url: $0) }
     }
 
+    /// Stat the directory's direct contents and count files matching
+    /// Latent's media extensions. Run once per folder, lazily on first row
+    /// appearance — the badge in the tree is the visible payoff. Off the
+    /// main actor so a deep tree doesn't stutter while badges populate.
+    func loadPhotoCountIfNeeded() async {
+        guard photoCount == nil else { return }
+        let folderURL = url
+        let exts = AppState.imageExtensions
+        let count = await Task.detached(priority: .background) {
+            let fm = FileManager.default
+            guard let items = try? fm.contentsOfDirectory(
+                at: folderURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { return 0 }
+            return items.reduce(0) { acc, u in
+                acc + (exts.contains(u.pathExtension.lowercased()) ? 1 : 0)
+            }
+        }.value
+        photoCount = count
+    }
+
     /// Re-stat the directory and merge new entries / drop missing ones. Used
     /// after a folder is opened so the tree reflects fs state without
     /// reloading the whole subtree.
@@ -50,14 +77,29 @@ final class FolderNode: Identifiable, Hashable {
         let prev = children
         children = nil
         loadChildrenIfNeeded()
-        // Preserve isExpanded for nodes that survived.
+        // Preserve isExpanded + cached photoCount for nodes that survived.
         if let prev, let now = children {
             let prevByURL = Dictionary(uniqueKeysWithValues: prev.map { ($0.url, $0) })
             for node in now {
                 if let old = prevByURL[node.url] {
                     node.isExpanded = old.isExpanded
                     node.children = old.children
+                    node.photoCount = old.photoCount
                 }
+            }
+        }
+    }
+
+    /// Re-stat this node and any descendants whose children we'd already
+    /// loaded. Used after a folder trash so the tree drops the dead row
+    /// (and any of its still-cached subtrees) without forcing the user to
+    /// hit the refresh button. Only descends into nodes we already
+    /// expanded — collapsed branches stay lazy.
+    func recursiveRefresh() {
+        refreshChildren()
+        if let kids = children {
+            for k in kids where k.isLoaded {
+                k.recursiveRefresh()
             }
         }
     }
@@ -117,6 +159,12 @@ struct FolderTreeView: View {
         .background(.background.secondary)
         .onChange(of: state.anchorFolder) { _, new in
             rebuildTree(for: new)
+        }
+        // After a folder is trashed (from this tree's right-click → Move
+        // to Trash), AppState bumps `folderTreeChangeTick`. Walk every
+        // already-loaded subtree to drop the dead row + its descendants.
+        .onChange(of: state.folderTreeChangeTick) { _, _ in
+            rootNode?.recursiveRefresh()
         }
         .onAppear { rebuildTree(for: state.anchorFolder) }
     }
@@ -186,7 +234,25 @@ struct FolderRowView: View {
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+            // Photo count for this folder's direct contents — lets the user
+            // tell at a glance which folder in a 100-deep tree actually has
+            // pictures. Lazy: starts nil (no badge), populates after a
+            // background stat. We hide the badge for empty folders to keep
+            // the tree clean.
+            if let count = node.photoCount, count > 0 {
+                Text("\(count)")
+                    .font(.system(.caption2, design: .rounded).weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule().fill(isSelected
+                                       ? Color.white.opacity(0.18)
+                                       : Color.secondary.opacity(0.15))
+                    )
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -202,6 +268,38 @@ struct FolderRowView: View {
         //     show the same flat photo list as any descendant).
         .onTapGesture {
             Task { await state.loadFolder(node.url, setAsAnchor: false, recursive: false) }
+        }
+        // Right-click affordances. "Move to Trash" is the headline ask but
+        // surfacing Reveal in Finder + the recurse-this-subtree option in
+        // the same menu makes the tree a much fuller-fledged file browser.
+        .contextMenu {
+            Button {
+                Task { await state.loadFolder(node.url, setAsAnchor: false, recursive: false) }
+            } label: {
+                Label("Open", systemImage: "folder")
+            }
+            Button {
+                Task { await state.loadFolder(node.url, setAsAnchor: false, recursive: true) }
+            } label: {
+                Label("Open with Subfolders", systemImage: "square.3.layers.3d.down.right")
+            }
+            Divider()
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([node.url])
+            } label: {
+                Label("Reveal in Finder", systemImage: "magnifyingglass")
+            }
+            Divider()
+            Button(role: .destructive) {
+                state.trashFolder(at: node.url)
+            } label: {
+                Label("Move to Trash", systemImage: "trash")
+            }
+        }
+        // Kicks off the lazy photo-count stat. .task auto-cancels if the
+        // row scrolls offscreen before the stat returns.
+        .task(id: node.url) {
+            await node.loadPhotoCountIfNeeded()
         }
     }
 
