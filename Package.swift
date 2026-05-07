@@ -16,7 +16,7 @@ let package = Package(
         .library(name: "PhotoGeo", targets: ["PhotoGeo"]),
         .library(name: "PhotoQuickLook", targets: ["PhotoQuickLook"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
-        .executable(name: "PhotoViewerApp", targets: ["PhotoViewerApp"]),
+        .executable(name: "Latent", targets: ["PhotoViewerApp"]),
     ],
     targets: [
         .target(

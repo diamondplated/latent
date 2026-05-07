@@ -6,19 +6,19 @@
     <string>en</string>
 
     <key>CFBundleExecutable</key>
-    <string>PhotoViewerApp</string>
+    <string>Latent</string>
 
     <key>CFBundleIdentifier</key>
-    <string>com.diamondplated.photo-viewer</string>
+    <string>com.diamondplated.latent</string>
 
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
 
     <key>CFBundleName</key>
-    <string>photo-viewer</string>
+    <string>Latent</string>
 
     <key>CFBundleDisplayName</key>
-    <string>photo-viewer</string>
+    <string>Latent</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -41,9 +41,6 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 
-    <!-- Document types: claim image formats so Finder offers photo-viewer
-         in "Open With…". LSHandlerRank=Alternate means we don't fight Photos.app
-         for default handler unless the user explicitly sets us. -->
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -83,6 +80,20 @@
                 <string>com.nikon.raw-image</string>
                 <string>com.sony.arw-raw-image</string>
                 <string>com.fuji.raw-image</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Photo archive</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.zip-archive</string>
+                <string>org.gnu.gnu-zip-archive</string>
+                <string>public.tar-archive</string>
             </array>
         </dict>
     </array>

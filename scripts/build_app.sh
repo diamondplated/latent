@@ -17,9 +17,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-APP_NAME="PhotoViewerApp"
+APP_NAME="Latent"
 APP_DIR="build/${APP_NAME}.app"
-BINARY_NAME="PhotoViewerApp"
+BINARY_NAME="Latent"
 INFO_PLIST="Resources/AppBundle/Info.plist"
 
 # 1. Build release. `--product` (not `--target`) is what actually links the
