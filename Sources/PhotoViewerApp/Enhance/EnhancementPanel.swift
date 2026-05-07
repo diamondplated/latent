@@ -23,40 +23,48 @@ struct EnhancementPanel: View {
                         .padding(.horizontal, 12)
                         .padding(.top, 12)
 
+                    // Sharpen first — it's the one stage that always works
+                    // without any models installed, so it's the most useful
+                    // default for a fresh user.
                     stageSection(
-                        title: "Artifact Removal",
-                        isExpanded: $artifactRemovalExpanded,
-                        enabled: state.artifactRemovalEnabled
+                        title: "Sharpen",
+                        isExpanded: $sharpenExpanded,
+                        enabled: state.sharpenEnabled,
+                        status: StageStatusResolver.sharpen()
                     ) {
-                        ArtifactRemovalControls(state: state)
-                    }
-                    stageSection(
-                        title: "Denoise",
-                        isExpanded: $denoiseExpanded,
-                        enabled: state.denoiseEnabled
-                    ) {
-                        DenoiseControls(state: state)
-                    }
-                    stageSection(
-                        title: "Face Restore",
-                        isExpanded: $faceRestoreExpanded,
-                        enabled: state.faceRestoreEnabled
-                    ) {
-                        FaceRestoreControls(state: state)
+                        SharpenControls(state: state)
                     }
                     stageSection(
                         title: "Upscale",
                         isExpanded: $upscaleExpanded,
-                        enabled: state.upscaleEnabled
+                        enabled: state.upscaleEnabled,
+                        status: StageStatusResolver.upscale(scale: state.upscaleParams.scale)
                     ) {
                         UpscaleControls(state: state)
                     }
                     stageSection(
-                        title: "Sharpen",
-                        isExpanded: $sharpenExpanded,
-                        enabled: state.sharpenEnabled
+                        title: "Denoise",
+                        isExpanded: $denoiseExpanded,
+                        enabled: state.denoiseEnabled,
+                        status: StageStatusResolver.denoise()
                     ) {
-                        SharpenControls(state: state)
+                        DenoiseControls(state: state)
+                    }
+                    stageSection(
+                        title: "Artifact Removal",
+                        isExpanded: $artifactRemovalExpanded,
+                        enabled: state.artifactRemovalEnabled,
+                        status: StageStatusResolver.artifactRemoval()
+                    ) {
+                        ArtifactRemovalControls(state: state)
+                    }
+                    stageSection(
+                        title: "Face Restore",
+                        isExpanded: $faceRestoreExpanded,
+                        enabled: state.faceRestoreEnabled,
+                        status: StageStatusResolver.faceRestore()
+                    ) {
+                        FaceRestoreControls(state: state)
                     }
 
                     Spacer(minLength: 8)
@@ -76,29 +84,67 @@ struct EnhancementPanel: View {
         title: String,
         isExpanded: Binding<Bool>,
         enabled: Bool,
+        status: StageStatus,
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             DisclosureGroup(isExpanded: isExpanded) {
-                content()
-                    .padding(.top, 8)
-                    .padding(.horizontal, 4)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !status.isOperational {
+                        // Inline disclosure for placebo stages — explains
+                        // exactly why the toggle is disabled. Includes the
+                        // conversion-script command so the user can do
+                        // something about it.
+                        modelMissingNote(title: title)
+                    }
+                    content()
+                        .disabled(!status.isOperational)
+                        .opacity(status.isOperational ? 1 : 0.5)
+                }
+                .padding(.top, 8)
+                .padding(.horizontal, 4)
             } label: {
-                HStack {
+                HStack(spacing: 8) {
                     Text(title)
                         .font(.subheadline.weight(.semibold))
+                    if let badge = status.badge {
+                        Text(badge)
+                            .font(.system(.caption2, design: .rounded))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    // Small dot indicates whether the stage will run on the
-                    // next pipeline pass — a quick at-a-glance check that's
-                    // visible even when the section is collapsed.
+                    // Status dot: green = real (classical or ML installed),
+                    // orange = degraded fallback, gray = placebo.
                     Circle()
-                        .fill(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
+                        .fill(status.dotColor.opacity(enabled ? 1 : 0.35))
                         .frame(width: 8, height: 8)
                 }
             }
             .padding(.horizontal, 12)
             Divider().padding(.top, 8)
         }
+    }
+
+    /// Shown inline inside a stage section when its model isn't installed.
+    /// Tells the user what they're missing and exactly how to fix it.
+    private func modelMissingNote(title: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(title) needs its CoreML model.")
+                    .font(.caption.weight(.medium))
+                Text("Run scripts/convert_*.py to install. The toggle is disabled until it's available.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var footer: some View {

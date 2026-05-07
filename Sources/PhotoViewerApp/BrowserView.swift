@@ -19,13 +19,12 @@ struct BrowserView: View {
     /// Hoisted from DetailView so the keypress handler here can drive blink
     /// state (B key down/up) and so the cache survives across mode switches.
     @State private var enhanceState = EnhancementState()
-    @State private var annotationState = AnnotationState()
 
     var body: some View {
         HSplitView {
             sidebar
                 .frame(minWidth: 240, idealWidth: 320)
-            DetailView(state: state, enhanceState: enhanceState, annotationState: annotationState)
+            DetailView(state: state, enhanceState: enhanceState)
                 .frame(minWidth: 480)
         }
         .focusable()
@@ -196,7 +195,6 @@ struct BrowserView: View {
     /// other keys propagate to `handleKey` (the vim dispatcher).
     @MainActor
     private func handleBlinkKey(_ press: KeyPress) -> KeyPress.Result {
-        if annotationState.isActive { return .ignored }
         guard press.key.character == "b" || press.key.character == "B" else {
             return .ignored
         }
@@ -216,13 +214,6 @@ struct BrowserView: View {
     /// (`.next/.prev/.first/.last/.jumpToMark`).
     @MainActor
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
-        // Suppress vim while annotation overlay is active — typing letters
-        // would otherwise both nav photos AND drop chord state, which is
-        // confusing when the user thinks they're focused on drawing.
-        if annotationState.isActive {
-            return .ignored
-        }
-
         // Arrow keys keep working as before — vim doesn't own them.
         switch press.key {
         case .leftArrow, .upArrow:   state.selectPrevious(); return .handled
