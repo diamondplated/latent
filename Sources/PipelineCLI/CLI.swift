@@ -9,6 +9,7 @@ import PhotoML
 import PhotoSearch
 import PhotoViewerCore
 import PhotoGeo
+import PhotoQuickLook
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -60,6 +61,8 @@ struct PipelineCLI {
             try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
         }
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
+        failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)
+        failures += await runVerification("QuickLookRenderer: rejects unsupported file extensions", check: quickLookRenderRejectsUnsupported)
 
         print()
         if failures == 0 {

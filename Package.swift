@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "PhotoSearch", targets: ["PhotoSearch"]),
         .library(name: "PhotoViewerCore", targets: ["PhotoViewerCore"]),
         .library(name: "PhotoGeo", targets: ["PhotoGeo"]),
+        .library(name: "PhotoQuickLook", targets: ["PhotoQuickLook"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
         .executable(name: "PhotoViewerApp", targets: ["PhotoViewerApp"]),
     ],
@@ -52,9 +53,14 @@ let package = Package(
             dependencies: ["PipelineCore", "PhotoIO"],
             path: "Sources/PhotoGeo"
         ),
+        .target(
+            name: "PhotoQuickLook",
+            dependencies: ["PipelineCore", "PhotoIO"],
+            path: "Sources/PhotoQuickLook"
+        ),
         .executableTarget(
             name: "PipelineCLI",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch", "PhotoViewerCore", "PhotoGeo"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch", "PhotoViewerCore", "PhotoGeo", "PhotoQuickLook"],
             path: "Sources/PipelineCLI"
         ),
         .executableTarget(
