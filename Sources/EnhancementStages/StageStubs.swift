@@ -30,10 +30,14 @@ public struct ArtifactRemoval: Stage {
     public init() {}
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
-        progress.report(0.0)
-        try await Task.sleep(nanoseconds: 1_000_000) // simulate work; replaced by FBCNN inference
-        progress.report(1.0)
-        return input
+        if params.strength == 0 { return input }
+        return try await runModelOrPassthrough(
+            input: input,
+            modelID: .artifactRemovalFBCNN,
+            spec: .fbcnn,
+            tileSize: 256,
+            progress: progress
+        )
     }
 }
 
@@ -55,10 +59,14 @@ public struct Denoise: Stage {
     public init() {}
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
-        progress.report(0.0)
-        try await Task.sleep(nanoseconds: 1_000_000)
-        progress.report(1.0)
-        return input
+        if params.strength == 0 { return input }
+        return try await runModelOrPassthrough(
+            input: input,
+            modelID: .denoiseNAFNet,
+            spec: .nafnet,
+            tileSize: 256,
+            progress: progress
+        )
     }
 }
 
@@ -190,9 +198,30 @@ public struct Sharpen: Stage {
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
         progress.report(0.0)
-        try await Task.sleep(nanoseconds: 1_000_000)
-        progress.report(1.0)
-        return input
+        defer { progress.report(1.0) }
+
+        // Bypass for amount=0 — avoids the CGImage round-trip when stage is a no-op.
+        if params.amount == 0 { return input }
+
+        let inputCG = try input.makeCGImage()
+        let ciImage = CIImage(cgImage: inputCG)
+        // Core Image's unsharp mask: subtracts a Gaussian-blurred copy from
+        // the original, scaled by intensity. Standard photographic sharpening.
+        let sharpened = ciImage.applyingFilter("CIUnsharpMask", parameters: [
+            kCIInputRadiusKey: params.radius,
+            kCIInputIntensityKey: params.amount,
+        ])
+        let workingSpace = CGColorSpace(name: CGColorSpace.linearSRGB)!
+        let context = CIContext(options: [.workingColorSpace: workingSpace])
+        guard let outCG = context.createCGImage(
+            sharpened,
+            from: CGRect(x: 0, y: 0, width: input.width, height: input.height),
+            format: .RGBA16,
+            colorSpace: workingSpace
+        ) else {
+            return input
+        }
+        return try ImageBuffer.fromCGImage(outCG)
     }
 }
 

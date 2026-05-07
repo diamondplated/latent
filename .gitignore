@@ -22,6 +22,8 @@ Resources/Models/*.mlmodelc
 # Conversion-script artifacts
 scripts/weights/
 scripts/.venv-convert/
+scripts/fbcnn/
+scripts/GFPGAN/
 .venv-convert/
 
 # Test fixtures
