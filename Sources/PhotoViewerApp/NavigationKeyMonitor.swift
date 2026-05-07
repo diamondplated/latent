@@ -40,10 +40,19 @@ final class NavigationKeyMonitor {
 
     /// Returns nil to swallow the event, original event to let it propagate.
     private func handle(event: NSEvent, state: AppState) -> NSEvent? {
-        // Don't fight TextFields / TextEditors for arrow keys. If the first
-        // responder is a text view, let arrows work as cursor movement.
+        // The previous version bailed when firstResponder was any NSText
+        // subclass — but NSOpenPanel has hidden text fields whose responder
+        // chain stuck around briefly after dismissal, eating our arrows
+        // intermittently. Switched to a coarser but more reliable check:
+        // ignore events targeting NSPanel windows (modal sheets, save/open
+        // dialogs all subclass it). The main viewer window is a plain
+        // NSWindow, so it gets through.
+        if event.window is NSPanel { return event }
+
+        // Genuinely-focused text editing (NSTextView only — not the parent
+        // NSText, which catches too much): let cursor-movement keys through.
         if let responder = event.window?.firstResponder,
-           responder is NSText || responder.isKind(of: NSTextView.self) {
+           responder.isKind(of: NSTextView.self) {
             return event
         }
 

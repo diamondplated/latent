@@ -90,12 +90,45 @@ struct DetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch enhanceState.displayMode {
-        case .sideBySide:
+        // Route by media type. Static images go through the
+        // pipeline-driven CGImage path; animated images use NSImageView
+        // for native playback; video uses AVKit. Side-by-side compare is
+        // image-only by design (comparing two mid-flight video frames is
+        // a different feature) so we still take the image path there.
+        switch (enhanceState.displayMode, currentURL.flatMap(MediaTyping.detect)) {
+        case (.sideBySide, _):
             HStack(spacing: 1) {
                 paneView(image: enhanceState.originalDisplayImage, label: "ORIGINAL")
                 Rectangle().fill(Color.gray.opacity(0.4)).frame(width: 1)
                 paneView(image: enhanceState.enhancedDisplayImage, label: "ENHANCED")
+            }
+        case (_, .animatedImage):
+            if let url = currentURL {
+                AnimatedImageView(url: url)
+                    .padding(8)
+                    .scaleEffect(zoom * transientZoom)
+                    .offset(x: pan.width + transientPan.width,
+                            y: pan.height + transientPan.height)
+                    .id(url)
+            }
+        case (_, .video):
+            if let url = currentURL {
+                VideoPlaybackView(url: url)
+                    .padding(8)
+                    .id(url)
+            }
+        case (_, .unsupported):
+            VStack(spacing: 6) {
+                Image(systemName: "questionmark.square.dashed")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.secondary)
+                Text("Unsupported file type")
+                    .foregroundStyle(.secondary)
+                if let url = currentURL {
+                    Text(url.lastPathComponent)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
             }
         default:
             paneView(image: imageForDisplay, label: nil)
