@@ -76,34 +76,16 @@ struct BrowserView: View {
         }
     }
 
-    /// Translucent overlay shown during folder scan / archive extraction.
-    /// Blocks input to the partially-populated grid below so the user
-    /// doesn't try to click thumbnails that are still arriving.
+    /// Translucent loader shown during folder scan / archive extraction.
+    /// Delegates rendering to LoadingScene which has the icon, gradient bar,
+    /// and live count.
+    @ViewBuilder
     private var loadingOverlay: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-            VStack(spacing: 12) {
-                ProgressView()
-                    .controlSize(.large)
-                if let status = state.loadStatus {
-                    Text(status)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 240)
-                }
-                if let err = state.lastError {
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 280)
-                }
-            }
+        if let phase = state.loadPhase {
+            LoadingScene(phase: phase, lastError: state.lastError)
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: state.isLoading)
         }
-        .transition(.opacity)
-        .animation(.easeInOut(duration: 0.15), value: state.isLoading)
     }
 
     /// Toolbar counter: "i / N" when a photo is selected, "N photos" if

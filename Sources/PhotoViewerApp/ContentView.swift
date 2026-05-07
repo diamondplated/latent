@@ -2,6 +2,11 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var state = AppState()
+    /// Window-level arrow-key monitor. Lives at the ContentView level so it
+    /// installs as soon as the app launches, not only after a folder opens —
+    /// otherwise arrow keys do nothing on the first folder you load (the
+    /// monitor's host view is still in empty state).
+    @State private var keyMonitor = NavigationKeyMonitor()
 
     var body: some View {
         Group {
@@ -20,6 +25,8 @@ struct ContentView: View {
                 }
             }
         }
+        .onAppear { keyMonitor.install(state: state) }
+        .onDisappear { keyMonitor.uninstall() }
     }
 }
 
