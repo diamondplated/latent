@@ -24,8 +24,14 @@ struct DetailView: View {
         HSplitView {
             imagePane
                 .frame(minWidth: 320)
-            EnhancementPanel(state: enhanceState)
+            // Enhancement panel is hidden by default — Latent is primarily
+            // a viewer. Toolbar button (in BrowserView) toggles it.
+            if state.showEnhancementPanel {
+                EnhancementPanel(state: enhanceState)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: state.showEnhancementPanel)
         .task(id: currentURL) {
             await loadCurrent()
             // Reset zoom/pan whenever the underlying photo changes so the

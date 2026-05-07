@@ -45,6 +45,17 @@ struct BrowserView: View {
             ToolbarItem(placement: .primaryAction) {
                 photoCounter
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    state.showEnhancementPanel.toggle()
+                } label: {
+                    Image(systemName: state.showEnhancementPanel
+                          ? "sidebar.right"
+                          : "wand.and.stars")
+                }
+                .help(state.showEnhancementPanel ? "Hide enhancement panel" : "Show enhancement panel")
+                .keyboardShortcut("e", modifiers: .command)
+            }
         }
         // Folder switch hooks.
         .onChange(of: state.folder) { _, newFolder in
