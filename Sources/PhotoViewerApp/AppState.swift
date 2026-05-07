@@ -10,58 +10,128 @@ import PhotoIO
 @MainActor
 @Observable
 final class AppState {
-    /// Folder currently being browsed.
+    /// Folder currently being browsed (or the temp dir produced by archive
+    /// extraction when the user opened an archive).
     var folder: URL? = nil
-    /// Image URLs in `folder`, sorted by name.
+    /// Image URLs in `folder` and any subfolders, sorted by relative path.
     var imageURLs: [URL] = []
     /// Index of the currently-selected image (if any).
     var selectedIndex: Int? = nil
     /// True while the folder is being scanned.
     var isLoading: Bool = false
+    /// Status text shown during long scans / archive extraction.
+    var loadStatus: String? = nil
+    /// Last error surface (extraction failed, etc.) — UI can show in a toast.
+    var lastError: String? = nil
 
     private var fileWatcher: DispatchSourceFileSystemObject?
+    /// When the active folder was produced by archive extraction, hold on to
+    /// the temp dir URL so we can clean it up when the user opens something
+    /// else (or when the app quits).
+    private var extractedArchiveDir: URL?
 
     static let imageExtensions: Set<String> = [
         "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff",
-        "webp", "avif", "jxl", "gif",
+        "webp", "avif", "jxl", "gif", "bmp",
     ]
 
-    /// Open a folder picker; on selection, scan and watch the folder.
+    /// Open a folder/archive picker; on selection, scan (recursively) and
+    /// watch the folder. Archive selections are extracted to a temp dir
+    /// transparently.
     func openFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false
+        // Accept both folders and supported archive files in one panel.
+        panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.title = "Open Folder of Photos"
+        panel.title = "Open Folder or Archive of Photos"
+        panel.message = "Choose a folder of photos or a .zip / .tar(.gz/.bz2/.xz) archive."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await loadFolder(url) }
     }
 
     func loadFolder(_ url: URL) async {
-        folder = url
         selectedIndex = nil
         isLoading = true
-        defer { isLoading = false }
+        loadStatus = nil
+        lastError = nil
+        defer { isLoading = false; loadStatus = nil }
 
-        let urls = scanFolder(url)
+        // Clean up any previous extracted-archive dir so /tmp doesn't fill up
+        // when the user opens several archives in a row.
+        if let prev = extractedArchiveDir {
+            try? FileManager.default.removeItem(at: prev)
+            extractedArchiveDir = nil
+        }
+
+        // Resolve the folder we're going to scan: archive → extract first,
+        // then treat the extraction dir as the source.
+        let scanRoot: URL
+        if ArchiveExtractor.isArchive(url) {
+            loadStatus = "Extracting \(url.lastPathComponent)…"
+            do {
+                let extractor = ArchiveExtractor()
+                scanRoot = try await extractor.extract(url)
+                extractedArchiveDir = scanRoot
+            } catch {
+                lastError = "\(error)"
+                folder = nil
+                imageURLs = []
+                return
+            }
+        } else {
+            scanRoot = url
+        }
+
+        folder = scanRoot
+        loadStatus = "Scanning \(scanRoot.lastPathComponent)…"
+        let urls = await Self.scanFolderRecursive(scanRoot)
         imageURLs = urls
         if !urls.isEmpty { selectedIndex = 0 }
 
-        startWatching(url)
+        startWatching(scanRoot)
     }
 
-    private func scanFolder(_ url: URL) -> [URL] {
-        let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-        return items
-            .filter { Self.imageExtensions.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    /// Recursively walk a folder, returning every image URL. Hops to a
+    /// detached background task so a folder with thousands of files doesn't
+    /// freeze the UI thread on `enumerator(at:)`.
+    private static func scanFolderRecursive(_ root: URL) async -> [URL] {
+        let imageExtensions = AppState.imageExtensions
+        return await Task.detached(priority: .userInitiated) { () -> [URL] in
+            let fm = FileManager.default
+            // Hidden subfolders + macOS metadata dirs (e.g., `__MACOSX` from
+            // zip archives created on macOS) are skipped: nothing useful and
+            // would otherwise show up as duplicates of every photo.
+            guard let enumerator = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else {
+                return []
+            }
+            var found: [URL] = []
+            // Use nextObject() rather than `for-in`; the Sequence-iterator
+            // form is marked unavailable from async contexts under Swift 6.
+            while let next = enumerator.nextObject() {
+                guard let url = next as? URL else { continue }
+                if url.lastPathComponent == "__MACOSX" {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                guard isFile else { continue }
+                guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
+                found.append(url)
+            }
+            // Sort by full relative-path so subfolder order is stable. Folders
+            // intermix naturally (each photo's path includes its subdir).
+            let basePath = root.path
+            return found.sorted { lhs, rhs in
+                let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
+                let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
+                return l.localizedStandardCompare(r) == .orderedAscending
+            }
+        }.value
     }
 
     private func startWatching(_ url: URL) {
@@ -73,16 +143,22 @@ final class AppState {
             eventMask: [.write, .extend, .rename, .delete],
             queue: .main
         )
+        // Watching only the root dir — we don't recurse-watch subfolders to
+        // avoid blowing through file-descriptor limits on huge libraries.
+        // Folder-level events still fire when files are added/removed at the
+        // top level; if the user reorganizes a deep subdir while the app is
+        // running they get inconsistent state until they reopen the folder.
         source.setEventHandler { [weak self] in
             guard let self else { return }
-            // Folder changed — rescan. Preserve the user's current selection
-            // by remembering its URL and re-finding it post-scan.
+            // Preserve the user's current selection across the rescan.
             let previousURL = self.selectedIndex.flatMap { idx in
                 idx < self.imageURLs.count ? self.imageURLs[idx] : nil
             }
-            let urls = self.scanFolder(url)
-            self.imageURLs = urls
-            self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) } ?? (urls.isEmpty ? nil : 0)
+            Task { @MainActor in
+                let urls = await Self.scanFolderRecursive(url)
+                self.imageURLs = urls
+                self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) } ?? (urls.isEmpty ? nil : 0)
+            }
         }
         source.setCancelHandler { close(fd) }
         source.resume()
