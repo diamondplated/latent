@@ -36,6 +36,23 @@ final class AppState {
     /// Whether the folder-tree sidebar (far-left pane) is visible. Default
     /// false to keep the layout simple for new users; toolbar button toggles.
     var showFolderTree: Bool = false
+    /// Sort order applied to folders in the tree sidebar. Persisted across
+    /// launches because it's the kind of preference you set once. Default
+    /// is alphabetical; "Recently Modified" is the choice for users who
+    /// want the latest shoot at the top of their tree.
+    var folderSort: FolderSort = .nameAscending {
+        didSet { UserDefaults.standard.set(folderSort.rawValue, forKey: "Latent.FolderSort") }
+    }
+
+    init() {
+        if let raw = UserDefaults.standard.string(forKey: "Latent.FolderSort"),
+           let sort = FolderSort(rawValue: raw) {
+            // Set the backing field directly so didSet doesn't re-write the
+            // value we just read. (didSet still fires on init in Swift; the
+            // re-write is harmless but pointless.)
+            folderSort = sort
+        }
+    }
     /// Root the folder tree displays from. Set to whatever the user picked
     /// in the Open dialog or Recents — clicking a subfolder in the tree
     /// updates `folder` but leaves anchor pinned, so the tree stays put as

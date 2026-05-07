@@ -1,6 +1,31 @@
 import SwiftUI
 import AppKit
 
+/// Sort order for folder rows in the tree sidebar. Owned by AppState
+/// (`state.folderSort`) and persisted across launches.
+enum FolderSort: String, CaseIterable, Sendable, Identifiable {
+    /// Locale-aware alphabetical, the default. Same comparator as Finder.
+    case nameAscending
+    /// Newest contentModificationDate at the top. For folders this reflects
+    /// when the folder was last MODIFIED (file added, removed, renamed) —
+    /// which for photo dumps is exactly "when did I last shoot here".
+    case modifiedDescending
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .nameAscending:       "Name"
+        case .modifiedDescending:  "Recently Modified"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .nameAscending:       "textformat"
+        case .modifiedDescending:  "clock"
+        }
+    }
+}
+
 /// Recursive tree node for the folder explorer. Children are lazy — we only
 /// `stat` a directory's contents the first time the user expands it. With
 /// thousands of nested folders under ~/Pictures, eager expansion would freeze
@@ -10,6 +35,12 @@ import AppKit
 @Observable
 final class FolderNode: Identifiable, Hashable {
     let url: URL
+    /// Captured at directory-listing time so a switch to mtime-sort doesn't
+    /// have to re-stat every folder. We piggyback on the
+    /// `contentsOfDirectory` call's `includingPropertiesForKeys:` prefetch
+    /// — one syscall pulls names AND mtimes for the parent's whole listing
+    /// at once, way cheaper than per-URL stats.
+    let mtime: Date
     /// `nil` = haven't loaded yet; `[]` = loaded and empty (a "leaf").
     private(set) var children: [FolderNode]?
     /// Persisted across re-renders so the disclosure state survives even when
@@ -29,23 +60,54 @@ final class FolderNode: Identifiable, Hashable {
     /// one) without forcing a load on every render.
     var isLoaded: Bool { children != nil }
 
-    init(url: URL) {
+    init(url: URL, mtime: Date = .distantPast) {
         self.url = url
+        self.mtime = mtime
     }
 
-    func loadChildrenIfNeeded() {
+    func loadChildrenIfNeeded(sort: FolderSort) {
         guard children == nil else { return }
         let fm = FileManager.default
+        // Prefetch isDirectory + contentModificationDate together so we
+        // don't pay an extra stat-per-URL when sort==.modifiedDescending.
         let items = (try? fm.contentsOfDirectory(
             at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         )) ?? []
-        children = items
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .filter { !Self.skipDir(name: $0.lastPathComponent) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            .map { FolderNode(url: $0) }
+        var nodes: [FolderNode] = []
+        for child in items {
+            guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey]),
+                  vals.isDirectory == true,
+                  !Self.skipDir(name: child.lastPathComponent) else { continue }
+            nodes.append(FolderNode(url: child, mtime: vals.contentModificationDate ?? .distantPast))
+        }
+        children = Self.sortNodes(nodes, by: sort)
+    }
+
+    /// Resort this node's loaded children + recurse into already-loaded
+    /// subtrees. Called when the user flips the sort menu — no fs work,
+    /// just a re-arrangement of the in-memory tree (mtimes were already
+    /// captured at load time).
+    func resort(by sort: FolderSort) {
+        guard children != nil else { return }
+        children = Self.sortNodes(children ?? [], by: sort)
+        if let kids = children {
+            for k in kids where k.isLoaded {
+                k.resort(by: sort)
+            }
+        }
+    }
+
+    private static func sortNodes(_ nodes: [FolderNode], by sort: FolderSort) -> [FolderNode] {
+        switch sort {
+        case .nameAscending:
+            return nodes.sorted {
+                $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
+            }
+        case .modifiedDescending:
+            return nodes.sorted { $0.mtime > $1.mtime }
+        }
     }
 
     /// Stat the directory's direct contents and count files matching
@@ -73,11 +135,13 @@ final class FolderNode: Identifiable, Hashable {
     /// Re-stat the directory and merge new entries / drop missing ones. Used
     /// after a folder is opened so the tree reflects fs state without
     /// reloading the whole subtree.
-    func refreshChildren() {
+    func refreshChildren(sort: FolderSort) {
         let prev = children
         children = nil
-        loadChildrenIfNeeded()
+        loadChildrenIfNeeded(sort: sort)
         // Preserve isExpanded + cached photoCount for nodes that survived.
+        // (mtime is `let`-captured fresh on the new nodes; it's by definition
+        // up-to-date because the new nodes came from a fresh stat.)
         if let prev, let now = children {
             let prevByURL = Dictionary(uniqueKeysWithValues: prev.map { ($0.url, $0) })
             for node in now {
@@ -189,6 +253,11 @@ struct FolderTreeView: View {
             if rootNode?.url == removed { return }
             rootNode?.removeNode(withURL: removed)
         }
+        // Sort change → in-memory re-arrange of every loaded subtree. No fs
+        // work because mtimes were captured at load time.
+        .onChange(of: state.folderSort) { _, new in
+            rootNode?.resort(by: new)
+        }
         .onAppear { rebuildTree(for: state.anchorFolder) }
     }
 
@@ -198,8 +267,9 @@ struct FolderTreeView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
             Spacer()
+            sortMenu
             Button {
-                rootNode?.refreshChildren()
+                rootNode?.refreshChildren(sort: state.folderSort)
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)
@@ -212,11 +282,35 @@ struct FolderTreeView: View {
         .padding(.vertical, 6)
     }
 
+    /// Header sort picker. macOS native menu w/ checkmark on the active
+    /// option courtesy of `Picker` inside `Menu`.
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort", selection: $state.folderSort) {
+                ForEach(FolderSort.allCases) { sort in
+                    Label(sort.label, systemImage: sort.symbol).tag(sort)
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Sort folders")
+    }
+
     private func rebuildTree(for anchor: URL?) {
         guard let anchor else { rootNode = nil; return }
-        let node = FolderNode(url: anchor)
+        // Pull the anchor's own mtime so it sorts correctly if it ever
+        // appears as a child of something (currently it doesn't, but the
+        // node is part of a uniform model — better than .distantPast).
+        let mtime = (try? anchor.resourceValues(forKeys: [.contentModificationDateKey])
+                     .contentModificationDate) ?? .distantPast
+        let node = FolderNode(url: anchor, mtime: mtime)
         node.isExpanded = true        // root expanded by default
-        node.loadChildrenIfNeeded()
+        node.loadChildrenIfNeeded(sort: state.folderSort)
         rootNode = node
     }
 }
@@ -336,7 +430,7 @@ struct FolderRowView: View {
         if !node.isLoaded {
             // Show a chevron speculatively. Click loads + expands.
             Button {
-                node.loadChildrenIfNeeded()
+                node.loadChildrenIfNeeded(sort: state.folderSort)
                 node.isExpanded.toggle()
             } label: {
                 Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
