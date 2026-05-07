@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .library(name: "PipelineCore", targets: ["PipelineCore"]),
         .library(name: "EnhancementStages", targets: ["EnhancementStages"]),
+        .library(name: "PhotoIO", targets: ["PhotoIO"]),
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
     ],
     targets: [
@@ -21,14 +22,19 @@ let package = Package(
             dependencies: ["PipelineCore"],
             path: "Sources/EnhancementStages"
         ),
+        .target(
+            name: "PhotoIO",
+            dependencies: ["PipelineCore"],
+            path: "Sources/PhotoIO"
+        ),
         .executableTarget(
             name: "PipelineCLI",
-            dependencies: ["PipelineCore", "EnhancementStages"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO"],
             path: "Sources/PipelineCLI"
         ),
         .testTarget(
             name: "PipelineCoreTests",
-            dependencies: ["PipelineCore", "EnhancementStages"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO"],
             path: "Tests/PipelineCoreTests"
         ),
     ]
