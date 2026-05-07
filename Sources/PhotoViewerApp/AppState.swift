@@ -57,6 +57,11 @@ final class AppState {
     /// the temp dir URL so we can clean it up when the user opens something
     /// else (or when the app quits).
     private var extractedArchiveDir: URL?
+    /// In-flight folder-walk task. Cancelled by `cancelScan()` (the Stop
+    /// button in the loading scene) or when a new `loadFolder` starts before
+    /// the previous one finishes. Whatever was found before cancel is still
+    /// committed — partial results are usually what the user wanted.
+    private var scanTask: Task<Void, Never>? = nil
 
     /// Everything Latent will pick up during a folder scan. Static images,
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
@@ -85,15 +90,25 @@ final class AppState {
     ///   pins this folder as the folder-tree's root so the tree shows from
     ///   here. When false (used by the folder-tree click handler itself),
     ///   only the active folder changes — the tree stays anchored.
-    /// - Parameter recursive: When true (the default — used by the Open
-    ///   dialog and friends), bulk-scan everything under the folder.
-    ///   When false (used by the folder-tree drill path), scan only this
-    ///   folder's direct contents — the tree IS the navigation, recursing
-    ///   into subfolders would defeat the point.
-    func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = true) async {
+    /// - Parameter recursive: When true, bulk-scan everything under the
+    ///   folder. Default is FALSE — opening a parent of ~/Pictures used to
+    ///   spin up a 100k-photo scan the user didn't ask for. The user opts
+    ///   into recursion via the toolbar's "Include Subfolders" button (or
+    ///   they navigate via the folder tree, which always loads
+    ///   non-recursively).
+    func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = false) async {
+        // If a previous scan is still running (rare — user clicked a new
+        // folder mid-scan), cancel it and wait for it to commit its partial
+        // results before we overwrite. Skipping the await would race two
+        // tasks into imageURLs.
+        if let prev = scanTask {
+            prev.cancel()
+            await prev.value
+        }
+        scanTask = nil
+
         selectedIndex = nil
         lastError = nil
-        defer { loadPhase = nil }
         if setAsAnchor { anchorFolder = url }
 
         // Clean up any previous extracted-archive dir so /tmp doesn't fill up
@@ -116,6 +131,7 @@ final class AppState {
                 lastError = "\(error)"
                 folder = nil
                 imageURLs = []
+                loadPhase = nil
                 return
             }
         } else {
@@ -127,127 +143,131 @@ final class AppState {
         // the recents — re-opening from recents replays the same flow,
         // including extraction. Only push real, non-temp paths so cleaned-
         // up extraction dirs don't poison the list.
-        if extractedArchiveDir == nil {
-            recents.push(url)
-        } else {
-            recents.push(url)  // archives are pushed as the .zip path
-        }
+        recents.push(url)
         loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
-        // Stream-collect on a background task so SwiftUI doesn't see imageURLs
-        // grow batch-by-batch (each batch update was forcing the toolbar /
-        // grid to diff a growing N-item array, multiplying main-thread work
-        // by O(batches) on huge folders). Live count comes from loadPhase
-        // alone; imageURLs is set once at the end.
+
+        // Walk on a background task we can cancel from `cancelScan()`.
+        // `Task.isCancelled` checks inside the walk let the Stop button
+        // bail out mid-enumeration on huge trees.
         let pathBase = scanRoot.path
-        let stream = Self.scanFolderStream(scanRoot, recursive: recursive)
         let folderName = scanRoot.lastPathComponent
-        let collected: [URL] = await Task.detached(priority: .userInitiated) { [weak self] in
-            var found: [URL] = []
-            for await batch in stream {
-                found.append(contentsOf: batch)
-                let count = found.count
-                // Hop to the main actor only for the live count update —
-                // not the imageURLs append. This makes the loader's count
-                // tick smoothly without paying the ForEach diff cost on
-                // every batch.
+        let recurse = recursive
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            var found = await Self.walkFolder(scanRoot, recursive: recurse) { [weak self] count in
                 await MainActor.run { [weak self] in
                     self?.loadPhase = .scanning(folderName: folderName, photosFound: count)
                 }
             }
-            // Sort happens on the same background task before we hand the
-            // array to SwiftUI. localizedStandardCompare on N=10k+ paths
-            // is the kind of work that absolutely must not be on main.
+            // Sort whatever we collected (whether scan ran to completion or
+            // the user hit Stop). localizedStandardCompare on 10k+ paths
+            // is heavy — keep it off main.
             found.sort { lhs, rhs in
                 let l = lhs.path.hasPrefix(pathBase) ? String(lhs.path.dropFirst(pathBase.count)) : lhs.path
                 let r = rhs.path.hasPrefix(pathBase) ? String(rhs.path.dropFirst(pathBase.count)) : rhs.path
                 return l.localizedStandardCompare(r) == .orderedAscending
             }
-            return found
-        }.value
-
-        // One atomic update: imageURLs gets the full sorted list, SwiftUI
-        // does ONE diff (against the empty starting state).
-        imageURLs = collected
-        if !imageURLs.isEmpty { selectedIndex = 0 }
+            // One atomic main-actor commit: imageURLs gets the full sorted
+            // list (or partial, if cancelled), SwiftUI does ONE ForEach diff.
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.imageURLs = found
+                self.selectedIndex = found.isEmpty ? nil : 0
+                self.loadPhase = nil
+            }
+        }
+        scanTask = task
+        await task.value
+        scanTask = nil
 
         startWatching(scanRoot)
     }
 
-    /// Recursively walk a folder, yielding batches of image URLs as they're
-    /// discovered. Streaming so `loadFolder` can show "Found X photos…"
-    /// during a multi-second scan instead of looking frozen.
-    private static func scanFolderStream(_ root: URL, recursive: Bool) -> AsyncStream<[URL]> {
-        let imageExtensions = AppState.imageExtensions
-        let batchSize = 64
-        return AsyncStream { continuation in
-            Task.detached(priority: .userInitiated) {
-                let fm = FileManager.default
-
-                // For non-recursive scans (folder-tree drill path), use
-                // contentsOfDirectory and yield in one shot. Cheap, finite,
-                // doesn't fight with the recursive enumerator's depth-first
-                // walk.
-                if !recursive {
-                    let items = (try? fm.contentsOfDirectory(
-                        at: root,
-                        includingPropertiesForKeys: [.isRegularFileKey],
-                        options: [.skipsHiddenFiles]
-                    )) ?? []
-                    let photos = items.filter { url in
-                        let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-                        return isFile && imageExtensions.contains(url.pathExtension.lowercased())
-                    }
-                    if !photos.isEmpty { continuation.yield(photos) }
-                    continuation.finish()
-                    return
-                }
-
-                // Recursive path: streaming enumerator + batch yields so the
-                // loader can show "Found X photos…" tick up live.
-                guard let enumerator = fm.enumerator(
-                    at: root,
-                    includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
-                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
-                ) else {
-                    continuation.finish()
-                    return
-                }
-                var batch: [URL] = []
-                while let next = enumerator.nextObject() {
-                    guard let url = next as? URL else { continue }
-                    if url.lastPathComponent == "__MACOSX" {
-                        enumerator.skipDescendants()
-                        continue
-                    }
-                    let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-                    guard isFile else { continue }
-                    guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
-                    batch.append(url)
-                    if batch.count >= batchSize {
-                        continuation.yield(batch)
-                        batch = []
-                    }
-                }
-                if !batch.isEmpty { continuation.yield(batch) }
-                continuation.finish()
-            }
-        }
+    /// Cancel the in-flight folder scan. Whatever was found before cancel
+    /// gets committed — discarding partial results would punish the user
+    /// for hitting Stop on a folder that already has plenty to look at.
+    func cancelScan() {
+        scanTask?.cancel()
     }
 
-    /// Synchronous version used by the file watcher's rescan path. Kept
-    /// non-streaming because watchers fire on tiny diffs where a one-shot
-    /// scan + replace is cheaper than re-streaming.
+    /// Walk a directory, returning all matched image URLs. `onProgress` is
+    /// called every ~64 files with the running count so the loader's "X
+    /// photos found" can tick up live. Honors the calling task's
+    /// cancellation: `Task.isCancelled` short-circuits the enumerator on
+    /// large trees, which is how the Stop button bails out mid-walk.
+    private static func walkFolder(
+        _ root: URL,
+        recursive: Bool,
+        onProgress: (@Sendable (Int) async -> Void)? = nil
+    ) async -> [URL] {
+        let imageExtensions = AppState.imageExtensions
+        let fm = FileManager.default
+        var found: [URL] = []
+
+        if !recursive {
+            // Cheap one-shot listing of the folder's direct contents. No
+            // streaming — at worst this is a few hundred entries; the
+            // scanner UI shouldn't bother flickering for it.
+            let items = (try? fm.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            for url in items {
+                if Task.isCancelled { break }
+                let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                if isFile && imageExtensions.contains(url.pathExtension.lowercased()) {
+                    found.append(url)
+                }
+            }
+            if let onProgress { await onProgress(found.count) }
+            return found
+        }
+
+        // Recursive walk: depth-first via FileManager.enumerator. Skip
+        // package descendants (kills .photoslibrary/.app interiors) and
+        // hidden files. Periodic Task.isCancelled + onProgress hooks let
+        // Stop be responsive even on huge trees.
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        let tickEvery = 64
+        var sinceTick = 0
+        while let next = enumerator.nextObject() {
+            if Task.isCancelled { break }
+            guard let url = next as? URL else { continue }
+            if url.lastPathComponent == "__MACOSX" {
+                enumerator.skipDescendants()
+                continue
+            }
+            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+            guard isFile else { continue }
+            guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
+            found.append(url)
+            sinceTick += 1
+            if sinceTick >= tickEvery {
+                sinceTick = 0
+                if let onProgress { await onProgress(found.count) }
+            }
+        }
+        return found
+    }
+
+    /// File-watcher rescan path. No streaming, no cancellation — watchers
+    /// fire on small fs diffs where running to completion is cheap.
     private static func scanFolderRecursive(_ root: URL) async -> [URL] {
-        var all: [URL] = []
-        for await batch in scanFolderStream(root, recursive: true) {
-            all.append(contentsOf: batch)
-        }
         let basePath = root.path
-        return all.sorted { lhs, rhs in
-            let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
-            let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
-            return l.localizedStandardCompare(r) == .orderedAscending
-        }
+        return await Task.detached(priority: .utility) {
+            var all = await walkFolder(root, recursive: true)
+            all.sort { lhs, rhs in
+                let l = lhs.path.hasPrefix(basePath) ? String(lhs.path.dropFirst(basePath.count)) : lhs.path
+                let r = rhs.path.hasPrefix(basePath) ? String(rhs.path.dropFirst(basePath.count)) : rhs.path
+                return l.localizedStandardCompare(r) == .orderedAscending
+            }
+            return all
+        }.value
     }
 
     private func startWatching(_ url: URL) {
@@ -321,6 +341,10 @@ final class AppState {
     /// empty state. Called by the double-Escape shortcut. Doesn't clear
     /// recents — the folder stays in MRU so re-opening is one click away.
     func closeFolder() {
+        // Cancel any in-flight scan first so a slow recursive walk doesn't
+        // keep churning fs reads after the user closes the folder.
+        scanTask?.cancel()
+        scanTask = nil
         stopWatching()
         if let prev = extractedArchiveDir {
             try? FileManager.default.removeItem(at: prev)
