@@ -12,6 +12,12 @@ import SwiftUI
 struct LoadingScene: View {
     let phase: AppState.LoadPhase
     let lastError: String?
+    /// Optional Stop callback. When set, the scene draws a Stop button
+    /// next to the progress bar — used to bail out of an unwanted recursive
+    /// scan (e.g., user opened a folder above ~/Pictures with 100k photos
+    /// underneath). Nil for phases where stopping makes no sense (archive
+    /// extract — interrupting tar mid-stream leaves a half-extracted dir).
+    var onStop: (() -> Void)? = nil
 
     @State private var pulse: CGFloat = 1.0
 
@@ -36,6 +42,22 @@ struct LoadingScene: View {
 
             indeterminateProgressBar
                 .frame(width: 220, height: 4)
+
+            // Show Stop only for cancellable phases (scanning). Hidden for
+            // archive extracts since interrupting unzip/tar mid-stream
+            // leaves a half-written temp dir.
+            if let onStop, case .scanning = phase {
+                Button(role: .destructive) {
+                    onStop()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                        .font(.callout.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.red)
+                .padding(.top, 4)
+            }
 
             if let lastError {
                 Text(lastError)

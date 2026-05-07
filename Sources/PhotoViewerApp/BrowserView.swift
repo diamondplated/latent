@@ -52,6 +52,23 @@ struct BrowserView: View {
                 .help(state.showFolderTree ? "Hide folder tree" : "Show folder tree")
                 .keyboardShortcut("l", modifiers: .command)
             }
+            // Opt-in recursive scan. The default load is non-recursive
+            // (just the folder's direct contents) — a parent of ~/Pictures
+            // used to spawn a 100k-photo scan the user didn't ask for.
+            // Hit this to pull in everything under the current folder.
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    if let folder = state.folder {
+                        Task {
+                            await state.loadFolder(folder, setAsAnchor: false, recursive: true)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "square.3.layers.3d.down.right")
+                }
+                .help("Include subfolders (recursive scan)")
+                .disabled(state.folder == nil || state.isLoading)
+            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $mode) {
                     ForEach(BrowseMode.allCases) { m in
@@ -110,26 +127,67 @@ struct BrowserView: View {
             // every batch update from the streaming scan, which spikes the
             // main thread (rainbow spinner). Show only the loading scene
             // until the scan settles.
-            if !state.isLoading {
+            if state.isLoading {
+                loadingOverlay
+            } else if state.imageURLs.isEmpty && state.folder != nil {
+                emptyFolderHint
+            } else {
                 switch mode {
                 case .grid: thumbnailGrid
                 case .map:  mapView
                 }
-            } else {
-                loadingOverlay
             }
         }
     }
 
+    /// Shown when the active folder has zero photos at the top level. The
+    /// new default is non-recursive, so opening a folder of folders lands
+    /// here — give the user an obvious next step (recurse) instead of a
+    /// silent empty grid that looks broken.
+    private var emptyFolderHint: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "tray")
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text("No photos in this folder")
+                .font(.title3.weight(.semibold))
+            Text("This folder's direct contents are empty. Subfolders below it may contain photos.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+            Button {
+                if let folder = state.folder {
+                    Task {
+                        await state.loadFolder(folder, setAsAnchor: false, recursive: true)
+                    }
+                }
+            } label: {
+                Label("Include Subfolders", systemImage: "square.3.layers.3d.down.right")
+            }
+            .controlSize(.large)
+            .keyboardShortcut("r", modifiers: .command)
+            .padding(.top, 4)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     /// Translucent loader shown during folder scan / archive extraction.
     /// Delegates rendering to LoadingScene which has the icon, gradient bar,
-    /// and live count.
+    /// and live count. Wires the Stop button to `cancelScan()` so the user
+    /// can bail out of a long recursive walk (e.g., they hit Include
+    /// Subfolders on ~/Pictures and realized that's 100k photos).
     @ViewBuilder
     private var loadingOverlay: some View {
         if let phase = state.loadPhase {
-            LoadingScene(phase: phase, lastError: state.lastError)
-                .transition(.opacity)
-                .animation(.easeInOut(duration: 0.2), value: state.isLoading)
+            LoadingScene(
+                phase: phase,
+                lastError: state.lastError,
+                onStop: { state.cancelScan() }
+            )
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: state.isLoading)
         }
     }
 
