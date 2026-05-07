@@ -104,6 +104,18 @@ public struct TensorSpec: Sendable {
         layout: .nchw,
         inputRange: (-1, 1)  // GFPGAN normalizes to [-1, 1] internally
     )
+
+    /// OpenCLIP ViT-B/32 image encoder. The conversion script bakes CLIP's
+    /// per-channel mean/std normalization into the model so this side only
+    /// sends [0, 1] images. Output is a 512-dim embedding tensor.
+    public static let openCLIPImage = TensorSpec(
+        inputName: "image",
+        outputName: "embedding",
+        channelOrder: .rgb,
+        dataType: .float32,
+        layout: .nchw,
+        inputRange: (0, 1)
+    )
 }
 
 /// Image-to-image CoreML model wrapper. Loads an `.mlpackage` (or compiled
@@ -142,10 +154,27 @@ public actor CoreMLImageModel {
         }
     }
 
-    /// Run inference on a buffer. Input and output sizes are determined by
-    /// the model — most super-res models accept arbitrary even dimensions and
-    /// produce `inputDim * scale` output.
+    /// Run inference, returning the output as an `ImageBuffer`. Use for
+    /// image-to-image models (super-res, denoise, restore, etc.) where the
+    /// output tensor matches an NCHW/NHWC RGB image shape.
     public func predict(_ input: ImageBuffer) throws -> ImageBuffer {
+        let output = try predictTensor(input)
+        return try makeImageBuffer(from: output)
+    }
+
+    /// Output of a tensor prediction: flat values + shape. Sendable, so it
+    /// crosses actor boundaries cleanly (raw MLMultiArray doesn't).
+    public struct TensorOutput: Sendable {
+        public let values: [Float]
+        public let shape: [Int]
+
+        public var totalCount: Int { values.count }
+    }
+
+    /// Run inference, returning the output as a flat `[Float]` plus shape.
+    /// Use for models whose output isn't image-shaped — embedding encoders,
+    /// classifiers, etc.
+    public func predictTensor(_ input: ImageBuffer) throws -> TensorOutput {
         precondition(input.format == .working, "predict requires working format")
 
         let mlInput = try makeMLMultiArray(from: input)
@@ -162,7 +191,33 @@ public actor CoreMLImageModel {
             throw CoreMLModelError.unexpectedOutputType("missing or non-array output for \(spec.outputName)")
         }
 
-        return try makeImageBuffer(from: outputArray)
+        let shape = outputArray.shape.map { $0.intValue }
+        let total = shape.reduce(1, *)
+        var values = [Float](repeating: 0, count: total)
+        let ptr = outputArray.dataPointer
+
+        switch outputArray.dataType {
+        case .float32:
+            let typed = ptr.assumingMemoryBound(to: Float32.self)
+            for i in 0..<total { values[i] = typed[i] }
+        case .float16:
+            let typed = ptr.assumingMemoryBound(to: Float16.self)
+            for i in 0..<total { values[i] = Float(typed[i]) }
+        case .double:
+            let typed = ptr.assumingMemoryBound(to: Double.self)
+            for i in 0..<total { values[i] = Float(typed[i]) }
+        case .int32:
+            let typed = ptr.assumingMemoryBound(to: Int32.self)
+            for i in 0..<total { values[i] = Float(typed[i]) }
+        case .int8:
+            // Quantized output. We're not currently dequantizing scale/zeropoint;
+            // raw int8 → Float is not meaningful for embeddings or images.
+            throw CoreMLModelError.unexpectedOutputType("int8 (quantized) output not supported yet — convert model with float16/float32 precision")
+        @unknown default:
+            throw CoreMLModelError.unexpectedOutputType("unsupported MLMultiArrayDataType: \(outputArray.dataType.rawValue)")
+        }
+
+        return TensorOutput(values: values, shape: shape)
     }
 
     // MARK: - Tensor conversion
@@ -234,8 +289,8 @@ public actor CoreMLImageModel {
         return array
     }
 
-    private func makeImageBuffer(from array: MLMultiArray) throws -> ImageBuffer {
-        let shape = array.shape.map { $0.intValue }
+    private func makeImageBuffer(from output: TensorOutput) throws -> ImageBuffer {
+        let shape = output.shape
         let (h, w): (Int, Int)
         switch spec.layout {
         case .nchw:
@@ -258,53 +313,32 @@ public actor CoreMLImageModel {
         let invScale = scaleRange == 0 ? 1.0 : 1.0 / scaleRange
 
         let channelOrder: [Int] = spec.channelOrder == .rgb ? [0, 1, 2] : [2, 1, 0]
-        let srcRaw = array.dataPointer
-        let dataType = spec.dataType
         let layout = spec.layout
 
         pixels.withUnsafeMutableBytes { rawPtr in
             let dst = rawPtr.bindMemory(to: Float16.self).baseAddress!
+            output.values.withUnsafeBufferPointer { srcBuf in
+                let src = srcBuf.baseAddress!
 
-            switch (dataType, layout) {
-            case (.float32, .nchw):
-                let src = srcRaw.assumingMemoryBound(to: Float32.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = (src[srcChannel * pixelCount + p] - lowRange) * invScale
-                        dst[p * 4 + c] = Float16(v)
+                switch layout {
+                case .nchw:
+                    for p in 0..<pixelCount {
+                        for c in 0..<3 {
+                            let srcChannel = channelOrder[c]
+                            let v = (src[srcChannel * pixelCount + p] - lowRange) * invScale
+                            dst[p * 4 + c] = Float16(v)
+                        }
+                        dst[p * 4 + 3] = 1.0  // opaque alpha
                     }
-                    dst[p * 4 + 3] = 1.0  // opaque alpha
-                }
-            case (.float16, .nchw):
-                let src = srcRaw.assumingMemoryBound(to: Float16.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = (Float(src[srcChannel * pixelCount + p]) - lowRange) * invScale
-                        dst[p * 4 + c] = Float16(v)
+                case .nhwc:
+                    for p in 0..<pixelCount {
+                        for c in 0..<3 {
+                            let srcChannel = channelOrder[c]
+                            let v = (src[p * 3 + srcChannel] - lowRange) * invScale
+                            dst[p * 4 + c] = Float16(v)
+                        }
+                        dst[p * 4 + 3] = 1.0
                     }
-                    dst[p * 4 + 3] = 1.0
-                }
-            case (.float32, .nhwc):
-                let src = srcRaw.assumingMemoryBound(to: Float32.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = (src[p * 3 + srcChannel] - lowRange) * invScale
-                        dst[p * 4 + c] = Float16(v)
-                    }
-                    dst[p * 4 + 3] = 1.0
-                }
-            case (.float16, .nhwc):
-                let src = srcRaw.assumingMemoryBound(to: Float16.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = (Float(src[p * 3 + srcChannel]) - lowRange) * invScale
-                        dst[p * 4 + c] = Float16(v)
-                    }
-                    dst[p * 4 + 3] = 1.0
                 }
             }
         }

@@ -6,6 +6,7 @@ import PipelineCore
 import EnhancementStages
 import PhotoIO
 import PhotoML
+import PhotoSearch
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -32,6 +33,9 @@ struct PipelineCLI {
         failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
         failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
         failures += await runVerification("FaceRestore is identity for an image with no detectable faces", check: faceRestoreNoFaces)
+        failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
+        failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
+        failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
 
         print()
         if failures == 0 {
@@ -431,6 +435,53 @@ func tileExecutorMultiTileIdentity() async throws {
     // Float16 quantization noise (mantissa precision ~3e-4 for unit-range values).
     let mae = meanAbsoluteRGBDifference(input, output)
     try require(mae < 5e-3, "multi-tile identity diverged: MAE = \(mae)")
+}
+
+// MARK: - PhotoSearch verifications
+
+func embeddingSelfSimilarityIsOne() async throws {
+    let v = EmbeddingVector([1.0, 2.0, 3.0, 4.0]).normalized()
+    let sim = v.cosineSimilarity(v)
+    try require(abs(sim - 1.0) < 1e-5, "expected ~1.0, got \(sim)")
+}
+
+func embeddingOrthogonalSimilarityIsZero() async throws {
+    let a = EmbeddingVector([1.0, 0.0, 0.0]).normalized()
+    let b = EmbeddingVector([0.0, 1.0, 0.0]).normalized()
+    let sim = a.cosineSimilarity(b)
+    try require(abs(sim) < 1e-5, "expected ~0.0 for orthogonal vectors, got \(sim)")
+}
+
+func embeddingIndexRoundTrip() async throws {
+    let tempFolder = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pv_search_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.removeItem(at: tempFolder)
+        if let url = try? EmbeddingIndex.indexFileURL(for: tempFolder) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    let index = EmbeddingIndex(folderURL: tempFolder)
+    let entry = IndexedPhoto(
+        relativePath: "subdir/photo.jpg",
+        embedding: EmbeddingVector(Array(repeating: Float(0.5), count: 512)).normalized(),
+        fileSize: 12345,
+        modifiedAt: Date(timeIntervalSince1970: 1700000000)
+    )
+    await index.upsert(entry)
+    try await index.save()
+
+    let reloaded = EmbeddingIndex(folderURL: tempFolder)
+    try await reloaded.load()
+    let count = await reloaded.count
+    try require(count == 1, "expected 1 entry after reload, got \(count)")
+    let got = await reloaded.entry(forRelativePath: "subdir/photo.jpg")
+    try require(got != nil, "entry missing after reload")
+    try require(got?.fileSize == 12345, "fileSize lost in roundtrip")
+    try require(abs((got?.embedding.values[0] ?? 0) - entry.embedding.values[0]) < 1e-5,
+                "embedding values changed in roundtrip")
 }
 
 func faceRestoreNoFaces() async throws {
