@@ -1,0 +1,25 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+Package.resolved
+xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Local model cache (downloaded on first enhance, not in repo)
+Resources/Models/*.mlpackage
+Resources/Models/*.mlmodelc
+
+# Test fixtures
+Tests/Fixtures/*.heic
+Tests/Fixtures/*.jpg
+!Tests/Fixtures/.gitkeep
