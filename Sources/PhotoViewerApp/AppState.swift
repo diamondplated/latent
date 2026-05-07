@@ -17,12 +17,24 @@ final class AppState {
     var imageURLs: [URL] = []
     /// Index of the currently-selected image (if any).
     var selectedIndex: Int? = nil
-    /// True while the folder is being scanned.
-    var isLoading: Bool = false
-    /// Status text shown during long scans / archive extraction.
-    var loadStatus: String? = nil
+    /// True while the folder is being scanned. Computed from `loadPhase` so
+    /// every loading-related field stays in lockstep — no chance of
+    /// `isLoading=true` with a stale `loadPhase=nil` or vice versa.
+    var isLoading: Bool { loadPhase != nil }
+    /// Structured "what's happening right now" so the loader UI can render a
+    /// rich, contextual scene instead of a plain spinner.
+    var loadPhase: LoadPhase? = nil
     /// Last error surface (extraction failed, etc.) — UI can show in a toast.
     var lastError: String? = nil
+
+    /// What stage the folder/archive open is in. Used to drive the loader UI.
+    enum LoadPhase: Equatable {
+        /// We're shelling out to /usr/bin/unzip or /usr/bin/tar.
+        case extracting(archiveName: String)
+        /// We're recursively walking the (possibly archive-extracted) folder.
+        /// `photosFound` updates live as the AsyncStream yields batches.
+        case scanning(folderName: String, photosFound: Int)
+    }
 
     private var fileWatcher: DispatchSourceFileSystemObject?
     /// When the active folder was produced by archive extraction, hold on to
@@ -52,10 +64,8 @@ final class AppState {
 
     func loadFolder(_ url: URL) async {
         selectedIndex = nil
-        isLoading = true
-        loadStatus = nil
         lastError = nil
-        defer { isLoading = false; loadStatus = nil }
+        defer { loadPhase = nil }
 
         // Clean up any previous extracted-archive dir so /tmp doesn't fill up
         // when the user opens several archives in a row.
@@ -68,7 +78,7 @@ final class AppState {
         // then treat the extraction dir as the source.
         let scanRoot: URL
         if ArchiveExtractor.isArchive(url) {
-            loadStatus = "Extracting \(url.lastPathComponent)…"
+            loadPhase = .extracting(archiveName: url.lastPathComponent)
             do {
                 let extractor = ArchiveExtractor()
                 scanRoot = try await extractor.extract(url)
@@ -84,14 +94,14 @@ final class AppState {
         }
 
         folder = scanRoot
-        loadStatus = "Scanning \(scanRoot.lastPathComponent)…"
+        loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
         // Drain the streaming scan, appending batches as they arrive so the
         // UI fills in live. For huge folders this is the difference between
         // "is this stuck?" and "X photos found, scanning…"
         imageURLs = []
         for await batch in Self.scanFolderStream(scanRoot) {
             imageURLs.append(contentsOf: batch)
-            loadStatus = "Found \(imageURLs.count) photo\(imageURLs.count == 1 ? "" : "s")…"
+            loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: imageURLs.count)
         }
         // Final sort once the walk is done — sorting per-batch would be
         // O(N log N) per batch and force the LazyVGrid to keep diffing.
