@@ -2,16 +2,14 @@
 
 A Mac-native photo viewer focused on speed, folder-based browsing, and best-in-class **local** AI enhancement. No cloud calls, no library import, no subscription.
 
-See `docs/PLAN.md` for full design context (move plan into the repo before sharing externally).
-
 ## Status
 
-This is the **architectural keystone** for the project: the pipeline DAG executor, intermediate cache, sidecar format, and stage protocol. Everything else (model inference, viewer UI, Quick Look extension) plugs into the surfaces defined here.
+This is a working SwiftPM macOS app plus the pipeline/search libraries behind it. The viewer is folder-first, the enhancement panel is model-aware, and the CLI verifier covers the pipeline pieces that cannot run through XCTest on CommandLineTools-only machines.
 
 What's working:
 
 - ✅ `PipelineCore` library — `ImageBuffer`, `Stage` protocol, `Pipeline` chain executor, `IntermediateCache` (LRU, byte-bounded), `EnhanceSidecar` (`.enhance.json` round-trip), `ImageBuffer ↔ CGImage` bridge
-- ✅ `EnhancementStages` — the 5 stages with **real, final parameter shapes** but **identity-function bodies** (no ML inference yet)
+- ✅ `EnhancementStages` — the 5 stages with real parameter shapes and model-aware execution/fallbacks
   - `ArtifactRemoval` (FBCNN)
   - `Denoise` (NAFNet)
   - `FaceRestore` (GFPGAN)
@@ -24,16 +22,16 @@ What's working:
   - `Upscale` — Real-ESRGAN x2 model if present, Lanczos resize fallback
   - `Denoise` (NAFNet), `ArtifactRemoval` (FBCNN) — model if present, identity passthrough otherwise
   - `FaceRestore` (GFPGAN) — Vision face detection → per-face crop → model → feathered alpha composite; fast-paths to identity if no faces detected or model unavailable
-- ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), `SearchEngine` (folder walk + index-or-skip + image-image queries). **Text-query path is stubbed** pending the BPE tokenizer port.
+- ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` / `CLIPTextEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), Swift BPE tokenizer, and `SearchEngine` folder indexing with image-image and text queries when converted model/tokenizer assets are installed.
 - ✅ `PhotoViewerApp` — SwiftUI app: folder picker → thumbnail grid (with color labels, picks/rejects from vim) ↔ map view → detail view with vim keymap (j/k/gg/G/marks/picks/labels), in-app pipeline UI (per-stage toggles + sliders + live preview), A/B compare (enhanced / original / side-by-side, hold-B blink), synced zoom/pan (0.25–16×, drag to pan, pinch to zoom, double-tap reset).
 - ✅ `PhotoQuickLook` — `QuickLookRenderer` using ImageIO's downsample fast path. Ready for an Xcode-based QL extension target to import directly.
 - ✅ `scripts/build_app.sh` — packages a real `.app` bundle from `swift build` output. Info.plist registers photo-viewer as a viewer for JPEG/HEIC/PNG/TIFF/RAW etc. so Finder offers `Open With → photo-viewer`.
-- ✅ `pv-pipeline` CLI — 27 self-verification scenarios
+- ✅ `pv-pipeline` CLI — self-verification scenarios for cache behavior, sidecars, image I/O, tiling, search primitives, vim state, GPS, Quick Look, and archive extraction
 
-What's stubbed:
+Still rough:
 
-- 🚧 CLIP text encoder works (model converts cleanly), but the BPE tokenizer is a Swift port of `clip.simple_tokenizer` — ~200 lines, its own milestone. Image-image search works fully without it.
-- 🚧 SwiftUI app is minimal — no vim keymap, no A/B compare, no in-app pipeline controls yet. App target is a Swift Package executable, not a proper Xcode app bundle (no code signing, no entitlements, no app icon). Migration to Xcode project is a separate milestone.
+- 🚧 CoreML model assets are not committed. Run the conversion scripts to install `.mlpackage` files under `Resources/Models/` or user Application Support.
+- 🚧 The app is still packaged from SwiftPM. `scripts/build_app.sh` creates a usable `.app`, but distribution-grade signing, sandbox entitlements, and the Quick Look extension target still need an Xcode project.
 
 ## Build & verify
 
@@ -61,7 +59,7 @@ open build/Latent.app
   command-line paths above are the workarounds; a proper "Open in
   Latent" Finder extension would need a separate Xcode-only target.
 
-Expected output:
+Expected output (abbreviated):
 
 ```
 photo-viewer pipeline runner / verifier
@@ -80,6 +78,7 @@ photo-viewer pipeline runner / verifier
   PASS  TileExecutor single-tile fast path is exact identity
   PASS  TileExecutor multi-tile identity reproduces input within Float16 tolerance
   PASS  TileExecutor 2x upscale produces correct output dimensions
+  ...
 
 All checks passed.
 ```
@@ -105,7 +104,7 @@ photo-viewer/
 │   ├── EnhancementStages/     # The 5 stages, all wired
 │   ├── PhotoIO/               # ImageReader / ImageWriter / ImageMetadata
 │   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager / FaceDetector / FaceComposite
-│   ├── PhotoSearch/           # EmbeddingVector / EmbeddingIndex / CLIPImageEncoder / SearchEngine (text encoder stubbed)
+│   ├── PhotoSearch/           # EmbeddingVector / EmbeddingIndex / CLIP image+text encoders / SearchEngine
 │   ├── PipelineCLI/           # `pv-pipeline` runner + self-verifier
 │   ├── PhotoQuickLook/        # QuickLookRenderer (consumed by future QL extension target)
 │   └── PhotoViewerApp/        # SwiftUI viewer (folder browse, vim keymap, map view, in-app pipeline UI, A/B compare)

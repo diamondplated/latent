@@ -275,16 +275,13 @@ struct BrowserView: View {
                     columns: [GridItem(.adaptive(minimum: thumbnailSize), spacing: 8)],
                     spacing: 8
                 ) {
-                    // Iterate over indices instead of Array(enumerated()) —
-                    // the latter allocates a fresh [(Int, URL)] every render,
-                    // which on a 2000+-item folder shows up in profiles.
-                    // Indices avoid the alloc and are also cheaper for
-                    // SwiftUI's id resolution.
-                    ForEach(state.imageURLs.indices, id: \.self) { idx in
-                        let url = state.imageURLs[idx]
+                    // Key cells by URL, not index. Sort/delete reshuffles
+                    // positions; URL identity prevents SwiftUI from reusing
+                    // a decoded thumbnail for the wrong file.
+                    ForEach(state.imageURLs, id: \.self) { url in
                         ThumbnailCell(
                             url: url,
-                            isSelected: state.selectedIndex == idx,
+                            isSelected: state.currentURL == url,
                             isMultiSelected: state.multiSelection.contains(url),
                             colorLabel: vimKeymap.colorLabel(for: url),
                             isPicked: vimKeymap.isPicked(url),
@@ -292,32 +289,32 @@ struct BrowserView: View {
                             size: thumbnailSize,
                             onTrash: { state.trashImage(at: url) }
                         )
-                        .id(idx)
+                        .id(url)
                         // ⌘-click → toggle this URL in the multi-selection
                         .gesture(
                             TapGesture()
                                 .modifiers(.command)
-                                .onEnded { _ in toggleMultiSelect(idx: idx) }
+                                .onEnded { _ in toggleMultiSelect(url: url) }
                         )
                         // Shift-click → range select from selectedIndex
-                        // anchor through this idx (inclusive)
+                        // anchor through this URL's current index (inclusive)
                         .gesture(
                             TapGesture()
                                 .modifiers(.shift)
-                                .onEnded { _ in extendMultiSelect(toIdx: idx) }
+                                .onEnded { _ in extendMultiSelect(to: url) }
                         )
                         // Plain click → clear multi, set primary
                         .onTapGesture {
                             state.multiSelection.removeAll()
-                            state.selectedIndex = idx
+                            state.select(url: url)
                         }
                     }
                 }
                 .padding(8)
             }
             .onChange(of: state.selectedIndex) { _, newValue in
-                if let i = newValue {
-                    withAnimation { proxy.scrollTo(i, anchor: .center) }
+                if let i = newValue, i < state.imageURLs.count {
+                    withAnimation { proxy.scrollTo(state.imageURLs[i], anchor: .center) }
                 }
             }
         }
@@ -326,25 +323,24 @@ struct BrowserView: View {
     // MARK: - Multi-selection
 
     /// Toggle a single thumbnail in the multi-selection (⌘-click handler).
-    /// Also makes this idx the primary so subsequent shift-clicks anchor
+    /// Also makes this URL the primary so subsequent shift-clicks anchor
     /// from here.
-    private func toggleMultiSelect(idx: Int) {
-        guard idx < state.imageURLs.count else { return }
-        let url = state.imageURLs[idx]
+    private func toggleMultiSelect(url: URL) {
+        guard state.imageURLs.contains(url) else { return }
         if state.multiSelection.contains(url) {
             state.multiSelection.remove(url)
         } else {
             state.multiSelection.insert(url)
         }
-        state.selectedIndex = idx
+        state.select(url: url)
     }
 
     /// Range-select from the current primary (selectedIndex) through the
-    /// clicked idx. Replaces the current multi-selection (Mac shift-click
+    /// clicked URL. Replaces the current multi-selection (Mac shift-click
     /// is "select range from anchor"; ⌘-shift-click would be "add range",
     /// but the simpler semantics are good enough for v1).
-    private func extendMultiSelect(toIdx idx: Int) {
-        guard idx < state.imageURLs.count else { return }
+    private func extendMultiSelect(to url: URL) {
+        guard let idx = state.imageURLs.firstIndex(of: url) else { return }
         let anchor = state.selectedIndex ?? idx
         let lo = min(anchor, idx)
         let hi = max(anchor, idx)
@@ -573,8 +569,12 @@ struct ThumbnailCell: View {
                 Label("Move to Trash", systemImage: "trash")
             }
         }
-        .task {
-            image = await ThumbnailLoader.shared.thumbnail(for: url)
+        .task(id: url) {
+            image = nil
+            hovered = false
+            let thumbnail = await ThumbnailLoader.shared.thumbnail(for: url)
+            guard !Task.isCancelled else { return }
+            image = thumbnail
         }
     }
 
