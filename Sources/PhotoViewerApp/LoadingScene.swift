@@ -74,7 +74,14 @@ struct LoadingScene: View {
         .shadow(color: .black.opacity(0.18), radius: 28, y: 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
-        .onAppear { pulse = 1.08 }
+        .onAppear {
+            pulse = 1.08
+            shimmerKey = true
+        }
+        .onDisappear {
+            pulse = 1.0
+            shimmerKey = false
+        }
     }
 
     // MARK: - Pieces
