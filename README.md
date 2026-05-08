@@ -44,6 +44,12 @@ swift run Latent                       # launch the viewer from the package bina
 swift scripts/generate_icon.swift      # render the app icon (one-time)
 ./scripts/build_app.sh
 open build/Latent.app
+
+# Install to /Applications:
+./scripts/install_app.sh
+
+# Fast-forward from GitHub, rebuild, and reinstall this checkout:
+./scripts/update_from_github.sh
 ```
 
 ### Opening folders
@@ -94,6 +100,24 @@ swift test
 
 Until then, the `pv-pipeline` CLI exercises the same scenarios with `assert()` semantics — see `Sources/PipelineCLI/main.swift`.
 
+## Updates
+
+Latent has two update paths:
+
+- Developer/local: `./scripts/update_from_github.sh` pulls `origin/main`,
+  rebuilds, reinstalls, and opens `/Applications/Latent.app`.
+- User-facing: Sparkle is wired into the app. GitHub Actions builds tagged
+  releases, uploads `Latent-<version>.zip` to GitHub Releases, and publishes
+  `appcast.xml` to GitHub Pages.
+
+Sparkle release automation needs two GitHub secrets:
+
+- `SPARKLE_PUBLIC_ED_KEY`
+- `SPARKLE_PRIVATE_KEY`
+
+See `docs/releases.md` for key generation, GitHub Pages setup, and the release
+tag flow.
+
 ## Project layout
 
 ```
@@ -117,6 +141,9 @@ photo-viewer/
 │   ├── convert_gfpgan.py      # Face restore: GFPGAN v1.4
 │   ├── convert_openclip.py    # Search: OpenCLIP ViT-B/32 (image + text encoders)
 │   ├── build_app.sh           # Package PhotoViewerApp as a real .app bundle
+│   ├── install_app.sh         # Build and install /Applications/Latent.app
+│   ├── update_from_github.sh  # Fast-forward main and reinstall locally
+│   ├── package_release.sh     # Build the Sparkle/GitHub release zip
 │   └── requirements.txt
 ├── Resources/AppBundle/
 │   └── Info.plist             # Document types, bundle ID, etc. for the .app bundle

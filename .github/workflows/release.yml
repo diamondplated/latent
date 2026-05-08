@@ -1,0 +1,128 @@
+name: Release Latent
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  pages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      SPARKLE_VERSION: "2.9.1"
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      INPUT_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          version="${tag#v}"
+          if [[ -z "$tag" || "$tag" == "$version" ]]; then
+            echo "Release tag must look like v0.1.1" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "LATENT_VERSION=$version" >> "$GITHUB_ENV"
+          echo "LATENT_BUILD_NUMBER=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Verify Sparkle secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_PRIVATE_KEY" || { echo "Missing SPARKLE_PRIVATE_KEY secret" >&2; exit 1; }
+          test -n "$SPARKLE_PUBLIC_ED_KEY" || { echo "Missing SPARKLE_PUBLIC_ED_KEY secret" >&2; exit 1; }
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Package app
+        run: ./scripts/package_release.sh
+
+      - name: Download Sparkle tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sparkle
+          curl -fsSL \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz" \
+            -o /tmp/sparkle/Sparkle.tar.xz
+          tar -xJf /tmp/sparkle/Sparkle.tar.xz -C /tmp/sparkle
+
+      - name: Generate signed appcast
+        shell: bash
+        run: |
+          set -euo pipefail
+          download_url_prefix="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          echo "$SPARKLE_PRIVATE_KEY" | /tmp/sparkle/bin/generate_appcast \
+            --ed-key-file - \
+            --download-url-prefix "$download_url_prefix" \
+            --maximum-deltas 0 \
+            -o dist/appcast/appcast.xml \
+            dist/appcast
+
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/appcast/Latent-${LATENT_VERSION}.zip"
+          notes="dist/appcast/Latent-${LATENT_VERSION}.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$archive" "$notes" --clobber
+            gh release edit "$RELEASE_TAG" --title "Latent ${LATENT_VERSION}" --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" "$archive" "$notes" \
+              --title "Latent ${LATENT_VERSION}" \
+              --notes-file "$notes"
+          fi
+
+      - name: Prepare Pages appcast
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          cp dist/appcast/appcast.xml public/appcast.xml
+          cp "dist/appcast/Latent-${LATENT_VERSION}.md" public/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy appcast to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

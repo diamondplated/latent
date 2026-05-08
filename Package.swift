@@ -18,6 +18,9 @@ let package = Package(
         .executable(name: "pv-pipeline", targets: ["PipelineCLI"]),
         .executable(name: "Latent", targets: ["PhotoViewerApp"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.1"),
+    ],
     targets: [
         .target(
             name: "PipelineCore",
@@ -65,7 +68,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "PhotoViewerApp",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoViewerCore", "PhotoGeo"],
+            dependencies: [
+                "PipelineCore",
+                "EnhancementStages",
+                "PhotoIO",
+                "PhotoML",
+                "PhotoViewerCore",
+                "PhotoGeo",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources/PhotoViewerApp"
         ),
         .testTarget(

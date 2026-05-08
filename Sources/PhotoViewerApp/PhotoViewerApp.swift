@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct PhotoViewerApp: App {
+    private let updater = AppUpdater()
+
     var body: some Scene {
         // Single Window (not WindowGroup): Latent is a viewer, one library
         // at a time — there's no useful "second window of the same app"
@@ -23,7 +25,17 @@ struct PhotoViewerApp: App {
         }
         .windowStyle(.titleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.isConfigured)
+            }
             CommandGroup(replacing: .newItem) {}  // no "New" menu item
+        }
+
+        Settings {
+            UpdaterSettingsView(updater: updater.updater)
         }
     }
 }

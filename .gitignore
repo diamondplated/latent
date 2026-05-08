@@ -5,7 +5,7 @@ build/
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
-Package.resolved
+dist/
 xcuserdata/
 *.pbxuser
 *.mode1v3
