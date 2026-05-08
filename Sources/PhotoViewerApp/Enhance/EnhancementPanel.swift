@@ -38,7 +38,7 @@ struct EnhancementPanel: View {
                         title: "Upscale",
                         isExpanded: $upscaleExpanded,
                         enabled: state.upscaleEnabled,
-                        status: StageStatusResolver.upscale(scale: state.upscaleParams.scale)
+                        status: StageStatusResolver.upscale(params: state.upscaleParams)
                     ) {
                         UpscaleControls(state: state)
                     }

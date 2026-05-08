@@ -173,15 +173,7 @@ public struct Upscale: Stage {
         progress.report(0.0)
         defer { progress.report(1.0) }
 
-        // Map the chosen model to a registry ID. SwinIR x2 doesn't ship; we
-        // map both Real-ESRGAN options through to RealESRGAN for now and add
-        // SwinIR to the registry once we ship that model.
-        let modelID: ModelID = switch (params.model, params.scale) {
-        case (.realESRGANx4plus, 4): .upscaleRealESRGANx4
-        case (.realESRGANx4plus, 2): .upscaleRealESRGANx2
-        case (.swinIRLarge, _):       .upscaleSwinIRLarge
-        default:                      .upscaleRealESRGANx2
-        }
+        let modelID = modelID(for: params)
 
         let model = try await ModelManager.shared.model(for: modelID, spec: .realESRGANx2)
 
@@ -221,6 +213,15 @@ public struct Upscale: Stage {
             ))
         }
         return try ImageBuffer.fromCGImage(outCG)
+    }
+
+    private func modelID(for params: Params) -> ModelID {
+        switch (params.model, params.scale) {
+        case (.realESRGANx4plus, 4): .upscaleRealESRGANx4
+        case (.realESRGANx4plus, 2): .upscaleRealESRGANx2
+        case (.swinIRLarge, _):       .upscaleSwinIRLarge
+        default:                      .upscaleRealESRGANx2
+        }
     }
 }
 

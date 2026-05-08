@@ -129,9 +129,17 @@ final class EnhancementState {
 
     /// In-flight pipeline run, if any. Replaced (and cancelled) on every edit.
     private var pipelineTask: Task<Void, Never>? = nil
+    /// Token for the newest pipeline run. Separate from loadGeneration so
+    /// cancelled edits for the same image can't clear a newer run's state.
+    private var pipelineGeneration: UInt64 = 0
     /// Token for the most recent `loadInput` so a slow read for an old URL
     /// can't clobber state set by a later URL.
     private var loadGeneration: UInt64 = 0
+    /// Shared full-buffer load so compare-mode switches and slider edits do
+    /// not pile up duplicate ImageReader work for the same image.
+    private var fullBufferLoadTask: Task<Void, Never>? = nil
+    private var fullBufferLoadGeneration: UInt64? = nil
+    private var fullBufferLoadURL: URL? = nil
 
     init() {}
 
@@ -158,9 +166,9 @@ final class EnhancementState {
         loadGeneration &+= 1
         let myGen = loadGeneration
 
-        // Cancel any in-flight pipeline for the previous image.
-        pipelineTask?.cancel()
-        pipelineTask = nil
+        // Cancel any in-flight work for the previous image.
+        cancelPipeline(clearProcessing: true)
+        cancelFullBufferLoad()
 
         // KEY: do NOT nil the previous photo's NSImages here. Keep showing
         // the last image while the new one decodes. When the new preview
@@ -227,30 +235,41 @@ final class EnhancementState {
     /// a compare mode that requires enhanced output.
     func loadFullBuffer(url: URL, generation myGen: UInt64) async {
         // If we've already loaded this URL's buffer, don't redo it.
-        if originalBuffer != nil, currentURL == url { return }
+        if originalBuffer != nil, currentURL == url {
+            if enhancedBuffer == nil, pipelineTask == nil {
+                runPipeline()
+            }
+            return
+        }
 
-        let result: Result<(ImageBuffer, ImageMetadata), Error> = await Task.detached(priority: .userInitiated) { [reader] in
+        if let task = fullBufferLoadTask,
+           fullBufferLoadGeneration == myGen,
+           fullBufferLoadURL == url {
+            await task.value
+            return
+        }
+
+        cancelFullBufferLoad()
+        fullBufferLoadGeneration = myGen
+        fullBufferLoadURL = url
+
+        let task = Task.detached(priority: .userInitiated) { [weak self, reader] in
+            guard !Task.isCancelled else { return }
+            let result: Result<(ImageBuffer, ImageMetadata), Error>
             do {
                 let pair = try reader.read(url: url)
-                return .success(pair)
+                result = .success(pair)
             } catch {
-                return .failure(error)
+                result = .failure(error)
             }
-        }.value
 
-        guard myGen == loadGeneration else { return }
-
-        switch result {
-        case .success(let (buffer, metadata)):
-            originalBuffer = buffer
-            originalMetadata = metadata
-            // Render the working-format buffer once and cache it. Falls back
-            // to previewCGImage in `originalDisplayImage` if this is somehow nil.
-            originalCGImage = try? buffer.makeCGImage()
-            runPipeline()
-        case .failure(let error):
-            lastError = "Read failed: \(error.localizedDescription)"
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.applyFullBufferLoadResult(result, url: url, generation: myGen)
+            }
         }
+        fullBufferLoadTask = task
+        await task.value
     }
 
     /// Called by the UI when the user changes compare mode. Triggers the
@@ -258,9 +277,16 @@ final class EnhancementState {
     /// result for the current photo.
     func ensureEnhancedAvailable() {
         guard let url = currentURL else { return }
-        if enhancedBuffer == nil {
-            Task { await loadFullBuffer(url: url, generation: loadGeneration) }
+        guard enhancedBuffer == nil else { return }
+
+        if originalBuffer != nil {
+            if pipelineTask == nil {
+                runPipeline()
+            }
+            return
         }
+
+        Task { await loadFullBuffer(url: url, generation: loadGeneration) }
     }
 
     /// Cancel any running pipeline and start a new one with the current
@@ -281,12 +307,15 @@ final class EnhancementState {
             return
         }
 
+        pipelineGeneration &+= 1
+        let myPipelineGen = pipelineGeneration
         pipelineTask?.cancel()
         let steps = buildSteps()
         let pipeline = Pipeline(steps: steps, cache: cache)
         let myGen = loadGeneration
 
         isProcessing = true
+        lastError = nil
 
         pipelineTask = Task { [weak self] in
             // Run off the main actor — Pipeline.run is async but the
@@ -302,9 +331,11 @@ final class EnhancementState {
             }.value
 
             guard let self else { return }
-            // Drop the result if the user moved on to a different image.
-            guard self.matchesGeneration(myGen) else { return }
-            self.applyPipelineResult(runResult)
+            // Drop the result if the user moved on to a different image or
+            // started a newer pipeline run for the same image.
+            guard self.matchesGeneration(myGen),
+                  self.matchesPipelineGeneration(myPipelineGen) else { return }
+            self.applyPipelineResult(runResult, pipelineGeneration: myPipelineGen)
         }
     }
 
@@ -363,8 +394,58 @@ final class EnhancementState {
         gen == loadGeneration
     }
 
-    private func applyPipelineResult(_ result: Result<ImageBuffer, Error>) {
+    private func matchesPipelineGeneration(_ gen: UInt64) -> Bool {
+        gen == pipelineGeneration
+    }
+
+    private func cancelPipeline(clearProcessing: Bool) {
+        pipelineGeneration &+= 1
+        pipelineTask?.cancel()
+        pipelineTask = nil
+        if clearProcessing {
+            isProcessing = false
+        }
+    }
+
+    private func cancelFullBufferLoad() {
+        fullBufferLoadTask?.cancel()
+        fullBufferLoadTask = nil
+        fullBufferLoadGeneration = nil
+        fullBufferLoadURL = nil
+    }
+
+    private func applyFullBufferLoadResult(
+        _ result: Result<(ImageBuffer, ImageMetadata), Error>,
+        url: URL,
+        generation myGen: UInt64
+    ) {
+        guard fullBufferLoadGeneration == myGen,
+              fullBufferLoadURL == url else { return }
+
+        fullBufferLoadTask = nil
+        fullBufferLoadGeneration = nil
+        fullBufferLoadURL = nil
+
+        guard myGen == loadGeneration, currentURL == url else { return }
+
+        switch result {
+        case .success(let (buffer, metadata)):
+            originalBuffer = buffer
+            originalMetadata = metadata
+            // Render the working-format buffer once and cache it. Falls back
+            // to previewCGImage in `originalDisplayImage` if this is somehow nil.
+            originalCGImage = try? buffer.makeCGImage()
+            runPipeline()
+        case .failure(let error):
+            guard !Self.isCancellation(error) else { return }
+            lastError = "Read failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyPipelineResult(_ result: Result<ImageBuffer, Error>, pipelineGeneration myPipelineGen: UInt64) {
+        guard matchesPipelineGeneration(myPipelineGen) else { return }
         isProcessing = false
+        pipelineTask = nil
         switch result {
         case .success(let buffer):
             enhancedBuffer = buffer
@@ -375,10 +456,15 @@ final class EnhancementState {
         case .failure(let error):
             // PipelineError.cancelled is expected on rapid edits — don't
             // surface it as a user-facing error.
-            if let pErr = error as? PipelineError, case .cancelled = pErr { return }
-            if error is CancellationError { return }
+            guard !Self.isCancellation(error) else { return }
             lastError = "Pipeline failed: \(error.localizedDescription)"
         }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let pErr = error as? PipelineError, case .cancelled = pErr { return true }
+        return false
     }
 
     private func buildSteps() -> [PipelineStep] {
@@ -406,7 +492,7 @@ final class EnhancementState {
             PipelineStep(
                 stage: AnyStage(Upscale(), params: upscaleParams),
                 enabled: upscaleEnabled
-                    && StageStatusResolver.upscale(scale: upscaleParams.scale).isOperational
+                    && StageStatusResolver.upscale(params: upscaleParams).isOperational
             ),
             PipelineStep(
                 stage: AnyStage(Sharpen(), params: sharpenParams),

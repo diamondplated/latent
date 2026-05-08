@@ -26,35 +26,20 @@ struct PhotoMapView: View {
     /// Approximate camera altitude in meters. Used to choose a clustering
     /// granularity. Updated by `onMapCameraChange`.
     @State private var altitudeMeters: Double = 1_000_000
+    /// The location set currently fit by the camera. Tracked separately from
+    /// camera movement so new folders fit once without yanking the map after
+    /// the user starts panning around.
+    @State private var fittedLocationSetID: LocationSetID?
+    @State private var userAdjustedCameraSinceFit = false
+    @State private var suppressingProgrammaticCameraChange = false
 
     init(locations: [PhotoLocation], onSelectCluster: @escaping ([URL]) -> Void) {
         self.locations = locations
         self.onSelectCluster = onSelectCluster
 
-        // Initial camera: geographic mean of the input set, or a default view
-        // if empty. A default of San Francisco gives a recognizable empty map.
-        let initialCenter: CLLocationCoordinate2D
-        let initialSpan: MKCoordinateSpan
-        if locations.isEmpty {
-            initialCenter = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-            initialSpan = MKCoordinateSpan(latitudeDelta: 1.0, longitudeDelta: 1.0)
-        } else {
-            let meanLat = locations.map(\.latitude).reduce(0, +) / Double(locations.count)
-            let meanLon = locations.map(\.longitude).reduce(0, +) / Double(locations.count)
-            initialCenter = CLLocationCoordinate2D(latitude: meanLat, longitude: meanLon)
-
-            // Pick a span that fits all points with a bit of padding.
-            let lats = locations.map(\.latitude)
-            let lons = locations.map(\.longitude)
-            let latRange = (lats.max() ?? meanLat) - (lats.min() ?? meanLat)
-            let lonRange = (lons.max() ?? meanLon) - (lons.min() ?? meanLon)
-            initialSpan = MKCoordinateSpan(
-                latitudeDelta: max(latRange * 1.4, 0.01),
-                longitudeDelta: max(lonRange * 1.4, 0.01)
-            )
-        }
-        let region = MKCoordinateRegion(center: initialCenter, span: initialSpan)
+        let region = Self.fittedRegion(for: locations)
         _cameraPosition = State(initialValue: .region(region))
+        _fittedLocationSetID = State(initialValue: locations.isEmpty ? nil : LocationSetID(locations: locations))
     }
 
     var body: some View {
@@ -64,6 +49,12 @@ struct PhotoMapView: View {
             } else {
                 map
             }
+        }
+        .onAppear {
+            fitCameraIfNeeded(for: locationSetID)
+        }
+        .onChange(of: locationSetID) { _, newSetID in
+            fitCameraIfNeeded(for: newSetID)
         }
     }
 
@@ -88,7 +79,76 @@ struct PhotoMapView: View {
             // `distance` is the camera height above the surface in meters.
             // Smaller = zoomed in.
             altitudeMeters = context.camera.distance
+            guard fittedLocationSetID != nil else { return }
+            if suppressingProgrammaticCameraChange {
+                suppressingProgrammaticCameraChange = false
+            } else {
+                userAdjustedCameraSinceFit = true
+            }
         }
+    }
+
+    private var locationSetID: LocationSetID? {
+        locations.isEmpty ? nil : LocationSetID(locations: locations)
+    }
+
+    @MainActor
+    private func fitCameraIfNeeded(for newSetID: LocationSetID?) {
+        guard let newSetID else {
+            fittedLocationSetID = nil
+            userAdjustedCameraSinceFit = false
+            return
+        }
+
+        guard shouldFitCamera(to: newSetID) else { return }
+
+        suppressingProgrammaticCameraChange = true
+        withAnimation(.easeInOut(duration: 0.25)) {
+            cameraPosition = .region(Self.fittedRegion(for: locations))
+        }
+        fittedLocationSetID = newSetID
+        userAdjustedCameraSinceFit = false
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            suppressingProgrammaticCameraChange = false
+        }
+    }
+
+    private func shouldFitCamera(to newSetID: LocationSetID) -> Bool {
+        guard let fittedLocationSetID else { return true }
+        if fittedLocationSetID == newSetID { return false }
+        if !userAdjustedCameraSinceFit { return true }
+
+        // If this is likely the same folder gradually gaining GPS results,
+        // preserve the user's pan/zoom. A mostly different URL set is a real
+        // new loaded set and should get one fresh fit.
+        return !newSetID.substantiallyOverlaps(with: fittedLocationSetID)
+    }
+
+    private static func fittedRegion(for locations: [PhotoLocation]) -> MKCoordinateRegion {
+        guard !locations.isEmpty else {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+                span: MKCoordinateSpan(latitudeDelta: 1.0, longitudeDelta: 1.0)
+            )
+        }
+
+        let lats = locations.map(\.latitude)
+        let lons = locations.map(\.longitude)
+        let minLat = lats.min() ?? 0
+        let maxLat = lats.max() ?? minLat
+        let minLon = lons.min() ?? 0
+        let maxLon = lons.max() ?? minLon
+        let center = CLLocationCoordinate2D(
+            latitude: (minLat + maxLat) / 2,
+            longitude: (minLon + maxLon) / 2
+        )
+        let span = MKCoordinateSpan(
+            latitudeDelta: max((maxLat - minLat) * 1.4, 0.01),
+            longitudeDelta: max((maxLon - minLon) * 1.4, 0.01)
+        )
+        return MKCoordinateRegion(center: center, span: span)
     }
 
     private var emptyState: some View {
@@ -191,4 +251,33 @@ private struct Cluster: Identifiable {
 private struct BucketKey: Hashable {
     let lat: Int
     let lon: Int
+}
+
+private struct LocationSetID: Equatable {
+    let keys: [LocationKey]
+    let urls: Set<URL>
+
+    init(locations: [PhotoLocation]) {
+        let builtKeys = locations
+            .map { LocationKey(url: $0.url, latitude: $0.latitude, longitude: $0.longitude) }
+            .sorted { lhs, rhs in
+                if lhs.url.path != rhs.url.path { return lhs.url.path < rhs.url.path }
+                if lhs.latitude != rhs.latitude { return lhs.latitude < rhs.latitude }
+                return lhs.longitude < rhs.longitude
+            }
+        self.keys = builtKeys
+        self.urls = Set(builtKeys.map(\.url))
+    }
+
+    func substantiallyOverlaps(with other: LocationSetID) -> Bool {
+        let overlap = urls.intersection(other.urls).count
+        guard overlap > 0 else { return false }
+        return Double(overlap) / Double(min(urls.count, other.urls.count)) >= 0.5
+    }
+}
+
+private struct LocationKey: Equatable {
+    let url: URL
+    let latitude: Double
+    let longitude: Double
 }
