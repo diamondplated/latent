@@ -1,4 +1,5 @@
 import SwiftUI
+import EnhancementStages
 import PhotoML
 
 /// What a stage will actually do on the next pipeline run, based on whether
@@ -71,15 +72,22 @@ enum StageStatusResolver {
     /// Upscale degrades to Lanczos resize when no model is present — real
     /// resampling, just not ML super-resolution. Worth distinguishing from
     /// the pure placebo cases so the user knows pixel dims will still change.
-    static func upscale(scale: Int) -> StageStatus {
-        if ModelRegistry.url(for: .upscaleRealESRGANx2) != nil
-            || ModelRegistry.url(for: .upscaleRealESRGANx4) != nil
-            || ModelRegistry.url(for: .upscaleSwinIRLarge) != nil {
+    static func upscale(params: Upscale.Params) -> StageStatus {
+        if ModelRegistry.url(for: upscaleModelID(for: params)) != nil {
             return .mlActive
         }
-        return scale == 1 ? .classical : .mlMissingWithFallback(fallbackName: "Lanczos")
+        return params.scale == 1 ? .classical : .mlMissingWithFallback(fallbackName: "Lanczos")
     }
 
     /// Always classical — Sharpen uses Core Image's CIUnsharpMask, no ML.
     static func sharpen() -> StageStatus { .classical }
+
+    private static func upscaleModelID(for params: Upscale.Params) -> ModelID {
+        switch (params.model, params.scale) {
+        case (.realESRGANx4plus, 4): .upscaleRealESRGANx4
+        case (.realESRGANx4plus, 2): .upscaleRealESRGANx2
+        case (.swinIRLarge, _):       .upscaleSwinIRLarge
+        default:                      .upscaleRealESRGANx2
+        }
+    }
 }

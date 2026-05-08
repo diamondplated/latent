@@ -47,17 +47,7 @@ struct ContentView: View {
 
     @MainActor
     private func openExternal(url: URL) async {
-        let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-        if isDir {
-            await state.loadFolder(url)
-        } else {
-            // File: load its parent and select the file.
-            let parent = url.deletingLastPathComponent()
-            await state.loadFolder(parent)
-            // After loadFolder completes, the URL list is set; jump to the
-            // clicked image if it's there.
-            state.select(url: url)
-        }
+        await state.openURL(url)
     }
 }
 
