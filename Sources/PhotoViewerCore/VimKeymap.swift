@@ -254,6 +254,34 @@ public final class VimKeymap {
         try data.write(to: url, options: .atomic)
     }
 
+    /// Capture current state into a Sendable snapshot, then write to disk
+    /// off the main actor. Avoids blocking the main thread on slow volumes.
+    public func saveInBackground(folder: URL) {
+        let snapshot = StateFile(
+            version: Self.supportedVersion,
+            folderPath: folder.path,
+            updatedAt: Date(),
+            marks: marks.reduce(into: [:]) { acc, kv in
+                acc[String(kv.key)] = Self.relativePath(of: kv.value, under: folder)
+            },
+            colorLabels: colorLabels.reduce(into: [:]) { acc, kv in
+                acc[Self.relativePath(of: kv.key, under: folder)] = kv.value
+            },
+            picks: picks.map { Self.relativePath(of: $0, under: folder) }.sorted(),
+            rejects: rejects.map { Self.relativePath(of: $0, under: folder) }.sorted()
+        )
+        // Compute the file URL on main (it needs @MainActor isolation for
+        // the static method), then detach the actual write.
+        guard let url = try? Self.stateFileURL(for: folder) else { return }
+        Task.detached(priority: .utility) {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            guard let data = try? encoder.encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
     /// Load state from the per-folder JSON file. Returns a fresh empty
     /// instance if no file exists yet; throws `VimKeymapError` on a
     /// future-version file.

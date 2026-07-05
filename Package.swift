@@ -73,5 +73,10 @@ let package = Package(
             dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch"],
             path: "Tests/PipelineCoreTests"
         ),
+        .testTarget(
+            name: "PhotoViewerCoreTests",
+            dependencies: ["PhotoViewerCore"],
+            path: "Tests/PhotoViewerCoreTests"
+        ),
     ]
 )

@@ -241,5 +241,5 @@ public actor ArchiveExtractor {
 }
 
 extension ArchiveFormat: CaseIterable {
-    public static let allCases: [ArchiveFormat] = [.zip, .tar, .tarGz, .tarBz2, .tarXz]
+    public static let allCases: [ArchiveFormat] = [.zip, .tar, .tarGz, .tarBz2, .tarXz, .rar, .sevenZip]
 }
