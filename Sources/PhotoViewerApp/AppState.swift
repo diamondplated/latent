@@ -7,6 +7,9 @@ import PhotoIO
 /// Holds the currently-selected folder and the list of image URLs in it.
 /// Watches the folder for changes via DispatchSource so adds/removes update
 /// the grid in near-real-time.
+///
+/// Composes `SelectionManager` and `TrashManager` for focused state
+/// management. Backward-compatible API wrappers delegate to the sub-objects.
 @MainActor
 @Observable
 final class AppState {
@@ -15,16 +18,27 @@ final class AppState {
     var folder: URL? = nil
     /// Image URLs in `folder` and any subfolders, sorted by relative path.
     var imageURLs: [URL] = []
-    /// Index of the currently-selected image (if any). The "primary" focus —
-    /// what the detail view shows. In multi-select mode this is the most
-    /// recent click + the anchor for shift-click range extension.
-    var selectedIndex: Int? = nil
-    /// Multi-selection set. Empty when in single-select mode (the typical
-    /// case). When non-empty, Backspace trashes ALL of these instead of
-    /// just the primary, and the toolbar shows a "N selected" pill.
-    /// Shift-click extends from `selectedIndex` anchor; ⌘-click toggles;
-    /// plain click clears + sets singleton; ⌘A selects all; Esc clears.
-    var multiSelection: Set<URL> = []
+
+    // MARK: - Composed sub-objects
+
+    /// Selection state: single-select, multi-select, navigation.
+    let selection = SelectionManager()
+    /// Trash & undo state: trash history ring, optimistic removal, restore.
+    let trash = TrashManager()
+
+    // MARK: - Delegation wrappers (backward compatibility)
+
+    /// Forwarded from SelectionManager for views that read directly.
+    var selectedIndex: Int? {
+        get { selection.selectedIndex }
+        set { selection.selectedIndex = newValue }
+    }
+    var multiSelection: Set<URL> {
+        get { selection.multiSelection }
+        set { selection.multiSelection = newValue }
+    }
+    var currentURL: URL? { selection.currentURL }
+
     /// True while the folder is being scanned. Computed from `loadPhase` so
     /// every loading-related field stays in lockstep — no chance of
     /// `isLoading=true` with a stale `loadPhase=nil` or vice versa.
@@ -42,6 +56,10 @@ final class AppState {
     /// Owned here so trashImage / closeFolder can poke it. The prefetch
     /// window is updated by BrowserView when selectedIndex changes.
     let prefetcher = ImagePrefetcher(capacity: 5)
+
+    /// Callback invoked when the folder is closed. Used by BrowserView to
+    /// reset EnhancementState so pixel buffers don't leak.
+    var onFolderClose: (() -> Void)?
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
     var showEnhancementPanel: Bool = false
@@ -85,6 +103,34 @@ final class AppState {
            let sort = FolderSort(rawValue: raw) {
             photoSort = sort
         }
+        // Wire up SelectionManager's URL source.
+        selection.imageURLs = { [weak self] in self?.imageURLs ?? [] }
+        // Wire up TrashManager callbacks.
+        trash.onOptimisticRemove = { [weak self] urls in
+            self?.optimisticallyRemoveImages(urls)
+        }
+        trash.onReinsertURLs = { [weak self] urls in
+            self?.reinsertFailedTrashURLs(urls)
+        }
+        trash.onEvictPrefetch = { [weak self] url in
+            self?.prefetcher.evict(url: url)
+        }
+        trash.onFolderTrashed = { [weak self] url in
+            self?.closeFolder()
+        }
+        trash.onRemoveRecent = { [weak self] url in
+            self?.recents.remove(url)
+        }
+        trash.onRestoreFolder = { [weak self] url in
+            guard let self else { return }
+            Task {
+                let urls = await Self.walkAndSort(url, recursive: self.loadedRecursively, sort: self.photoSort)
+                let newPhotos = urls.filter { !self.imageURLs.contains($0) }
+                guard !newPhotos.isEmpty, let basePath = self.folder?.path else { return }
+                self.imageURLs.append(contentsOf: newPhotos)
+                self.imageURLs = Self.sortPhotos(self.imageURLs, by: self.photoSort, basePath: basePath)
+            }
+        }
     }
     /// Root the folder tree displays from. Set to whatever the user picked
     /// in the Open dialog or Recents — clicking a subfolder in the tree
@@ -102,66 +148,14 @@ final class AppState {
         case scanning(folderName: String, photosFound: Int)
     }
 
-    /// One trash operation, undoable as a unit. Bulk trashes hold many
-    /// entries; folder trashes hold one (the folder root). `trashURL` is
-    /// the post-trash location (`~/.Trash/photo.jpg` typically) — undo
-    /// moves the file from there back to `originalURL`.
-    struct TrashRecord {
-        let id: UUID
-        let entries: [Entry]
-        let isFolder: Bool
-        var isPending: Bool = false
-        var undoRequested: Bool = false
-
-        struct Entry {
-            let originalURL: URL
-            /// Where the OS landed the trashed item. nil if we couldn't
-            /// capture it (older API path); undo skips these entries.
-            let trashURL: URL?
-        }
-    }
-
     private var fileWatcher: DispatchSourceFileSystemObject?
-    /// When the active folder was produced by archive extraction, hold on to
-    /// the temp dir URL so we can clean it up when the user opens something
-    /// else (or when the app quits).
     private var extractedArchiveDir: URL?
-    /// Whether the active folder was loaded recursively. The file watcher
-    /// uses this so a non-recursive load doesn't trigger an O(deep tree)
-    /// rescan on every fs event — that combo was hanging the app when the
-    /// user trashed photos in a folder whose subtree was huge.
     private var loadedRecursively: Bool = false
-    /// In-flight watcher-driven rescan. Cancelled and replaced when a new
-    /// fs event fires, so rapid-fire events (a deletion sometimes triggers
-    /// half a dozen) coalesce into a single rescan instead of stacking.
     private var watcherRescanTask: Task<Void, Never>? = nil
-    /// In-flight folder-walk task. Cancelled by `cancelScan()` (the Stop
-    /// button in the loading scene) or when a new `loadFolder` starts before
-    /// the previous one finishes. Whatever was found before cancel is still
-    /// committed — partial results are usually what the user wanted.
     private var scanTask: Task<Void, Never>? = nil
-    /// Monotonic token for folder loads. Starting a new load, or closing the
-    /// current folder, invalidates any older async extract/scan task so stale
-    /// work cannot repopulate the UI after the user has moved on.
     private var scanGeneration: UInt64 = 0
-    /// Bumped every time disk state diverges from the folder tree's cached
-    /// view — currently after a folder trash. Paired with `lastRemovedFolder`
-    /// so the tree can splice the dead node out by URL instead of running a
-    /// recursive re-stat (the recursive re-stat was hanging the app for
-    /// seconds on deeply-expanded trees).
     var folderTreeChangeTick: Int = 0
-    /// URL of the most recently trashed folder. The folder tree's
-    /// `.onChange(of: folderTreeChangeTick)` listener uses this to find
-    /// and remove the dead node in a single DFS pass — no fs work.
     private(set) var lastRemovedFolder: URL? = nil
-    /// Ring of recent trash operations, newest at the end. ⌘Z pops the
-    /// last one and tries to restore each entry from `~/.Trash`. Capped
-    /// so a long session doesn't accumulate unbounded history.
-    private(set) var trashHistory: [TrashRecord] = []
-    private let trashHistoryCap = 20
-    /// True when there's a trash op available to undo. Drives the
-    /// optional toolbar/menu disabled state.
-    var canUndoTrash: Bool { trashHistory.contains { !$0.undoRequested } }
 
     /// Everything Latent will pick up during a folder scan. Static images,
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
@@ -509,36 +503,13 @@ final class AppState {
         fileWatcher = source
     }
 
-    func selectNext() {
-        guard !imageURLs.isEmpty else { return }
-        selectedIndex = min((selectedIndex ?? -1) + 1, imageURLs.count - 1)
-    }
+    // MARK: - Selection delegation
 
-    func selectPrevious() {
-        guard !imageURLs.isEmpty else { return }
-        selectedIndex = max((selectedIndex ?? imageURLs.count) - 1, 0)
-    }
-
-    func selectFirst() {
-        selectedIndex = imageURLs.isEmpty ? nil : 0
-    }
-
-    func selectLast() {
-        selectedIndex = imageURLs.isEmpty ? nil : imageURLs.count - 1
-    }
-
-    /// Jump to a specific URL (no-op if it's not in the current folder).
-    /// Used by vim mark-jump and map-cluster selection.
-    func select(url: URL) {
-        if let i = imageURLs.firstIndex(of: url) {
-            selectedIndex = i
-        }
-    }
-
-    var currentURL: URL? {
-        guard let i = selectedIndex, i < imageURLs.count else { return nil }
-        return imageURLs[i]
-    }
+    func selectNext() { selection.selectNext() }
+    func selectPrevious() { selection.selectPrevious() }
+    func selectFirst() { selection.selectFirst() }
+    func selectLast() { selection.selectLast() }
+    func select(url: URL) { selection.select(url: url) }
 
     func stopWatching() {
         fileWatcher?.cancel()
@@ -547,83 +518,19 @@ final class AppState {
         watcherRescanTask = nil
     }
 
-    /// Move a single image to the user's Trash. Reversible via ⌘Z —
-    /// `trashItem`'s resultingItemURL is captured into the trash history
-    /// so undo can move the file back from `~/.Trash`. Updates
-    /// `imageURLs` + `selectedIndex` optimistically.
-    func trashImage(at url: URL) {
-        trashImages([url])
-    }
+    // MARK: - Trash delegation
 
-    /// Bulk trash. Each file is trashed individually (so a single failure
-    /// doesn't take down the whole batch) but the resulting entries land
-    /// in ONE TrashRecord, so ⌘Z restores them all together. Used when the
-    /// user has built up a `multiSelection` and hits Backspace.
-    func trashImages(_ urls: [URL]) {
-        let ordered = uniqueURLs(urls)
-        guard !ordered.isEmpty else { return }
+    func trashImage(at url: URL) { trash.trashImage(at: url) }
+    func trashImages(_ urls: [URL]) { trash.trashImages(urls) }
 
-        let recordID = UUID()
-        pushTrashRecord(TrashRecord(
-            id: recordID,
-            entries: ordered.map { .init(originalURL: $0, trashURL: nil) },
-            isFolder: false,
-            isPending: true
-        ))
 
-        // Drop requested photos from the visible list before Finder's Trash
-        // machinery runs. `trashItem` can stall on large or remote folders;
-        // the UI should feel instant and the async result can reconcile
-        // undo/error state when it lands.
-        optimisticallyRemoveImages(ordered)
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            var entries: [TrashRecord.Entry] = []
-            var failed: [URL] = []
-            for url in ordered {
-                var resultURL: NSURL?
-                do {
-                    try FileManager.default.trashItem(at: url, resultingItemURL: &resultURL)
-                    entries.append(.init(originalURL: url, trashURL: resultURL as URL?))
-                } catch {
-                    failed.append(url)
-                }
-            }
-
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.completeTrashRecord(id: recordID, trashedEntries: entries, failedURLs: failed)
-            }
-        }
-    }
-
-    private func uniqueURLs(_ urls: [URL]) -> [URL] {
-        var seen = Set<URL>()
-        var out: [URL] = []
-        for url in urls where !seen.contains(url) {
-            seen.insert(url)
-            out.append(url)
-        }
-        return out
-    }
 
     private func optimisticallyRemoveImages(_ urls: [URL]) {
         let trashedSet = Set(urls)
         let selectedURL = currentURL
-        let firstRemovedIdx = imageURLs.firstIndex { trashedSet.contains($0) }
         for url in trashedSet { prefetcher.evict(url: url) }
         imageURLs.removeAll { trashedSet.contains($0) }
-        multiSelection.subtract(trashedSet)
-
-        if imageURLs.isEmpty {
-            selectedIndex = nil
-        } else if let selectedURL, let newIdx = imageURLs.firstIndex(of: selectedURL) {
-            selectedIndex = newIdx
-        } else if let firstRemovedIdx {
-            selectedIndex = min(firstRemovedIdx, imageURLs.count - 1)
-        } else {
-            selectedIndex = min(selectedIndex ?? 0, imageURLs.count - 1)
-        }
+        selection.adjustAfterRemoval(removedURLs: trashedSet, previousURL: selectedURL)
     }
 
     private func reinsertFailedTrashURLs(_ urls: [URL]) {
@@ -647,158 +554,27 @@ final class AppState {
     /// otherwise the single primary photo. Bound to Backspace.
     func trashCurrentImage() {
         if !multiSelection.isEmpty {
-            trashImages(Array(multiSelection))
+            trash.trashImages(Array(multiSelection))
             return
         }
         guard let i = selectedIndex, i < imageURLs.count else { return }
-        trashImage(at: imageURLs[i])
+        trash.trashImage(at: imageURLs[i])
     }
 
-    /// Add a record to the history ring, dropping the oldest if we'd
-    /// exceed the cap. ⌘Z pulls from the END (most recent first).
-    private func pushTrashRecord(_ record: TrashRecord) {
-        trashHistory.append(record)
-        if trashHistory.count > trashHistoryCap {
-            let overflow = trashHistory.count - trashHistoryCap
-            for _ in 0..<overflow {
-                if let idx = trashHistory.firstIndex(where: { !$0.isPending }) {
-                    trashHistory.remove(at: idx)
-                }
-            }
-        }
-    }
-
-    private func completeTrashRecord(id: UUID, trashedEntries: [TrashRecord.Entry], failedURLs: [URL]) {
-        if !failedURLs.isEmpty {
-            lastError = "Couldn't trash: \(failedURLs.prefix(3).map(\.lastPathComponent).joined(separator: ", "))"
-                + (failedURLs.count > 3 ? " (+\(failedURLs.count - 3) more)" : "")
-            reinsertFailedTrashURLs(failedURLs)
-        }
-
-        guard let idx = trashHistory.firstIndex(where: { $0.id == id }) else { return }
-
-        let completedByURL = Dictionary(uniqueKeysWithValues: trashedEntries.map { ($0.originalURL, $0) })
-        var record = trashHistory[idx]
-        record = TrashRecord(
-            id: record.id,
-            entries: record.entries.compactMap { completedByURL[$0.originalURL] },
-            isFolder: record.isFolder,
-            isPending: false,
-            undoRequested: record.undoRequested
-        )
-
-        if record.entries.isEmpty {
-            trashHistory.remove(at: idx)
-            return
-        }
-
-        if record.undoRequested {
-            trashHistory.remove(at: idx)
-            restoreTrashRecord(record)
-        } else {
-            trashHistory[idx] = record
-        }
-    }
-
-    /// Undo the most recent trash operation. Moves each entry back from
-    /// its trash URL to its original location. Files where the move
-    /// fails (rare — usually means the original path now has a fresh
-    /// file, or the trash got emptied) get reported in `lastError` and
-    /// the rest of the batch still restores.
-    func undoTrash() {
-        guard let idx = trashHistory.indices.last(where: { !trashHistory[$0].undoRequested }) else { return }
-        if trashHistory[idx].isPending {
-            trashHistory[idx].undoRequested = true
-            lastError = "Trash is still finishing; restore will run as soon as macOS gives us the Trash URL."
-            return
-        }
-        let record = trashHistory.remove(at: idx)
-        restoreTrashRecord(record)
-    }
-
-    private func restoreTrashRecord(_ record: TrashRecord) {
-        var restored: [URL] = []
-        var failed: [String] = []
-        let fm = FileManager.default
-        for entry in record.entries {
-            guard let trashURL = entry.trashURL else {
-                failed.append(entry.originalURL.lastPathComponent)
-                continue
-            }
-            do {
-                try fm.moveItem(at: trashURL, to: entry.originalURL)
-                restored.append(entry.originalURL)
-            } catch {
-                failed.append(entry.originalURL.lastPathComponent)
-            }
-        }
-        if !failed.isEmpty {
-            lastError = "Couldn't restore: \(failed.prefix(3).joined(separator: ", "))"
-                + (failed.count > 3 ? " (+\(failed.count - 3) more)" : "")
-        }
-
-        // Optimistic UI: re-add restored items that belong in the active
-        // folder. The file watcher will eventually arrive at the same
-        // state, but the user gets immediate feedback.
-        guard let folder, !restored.isEmpty else { return }
-        let basePath = folder.path
-        let prefix = basePath.hasSuffix("/") ? basePath : basePath + "/"
-        let belongsHere = restored.filter { $0.path.hasPrefix(prefix) || $0.path == folder.path }
-        // Folder undo: a whole subtree just came back. Walk it ourselves
-        // for any photos to inject — the watcher only catches root-level
-        // additions in the recursive case.
-        if record.isFolder, let restoredFolder = restored.first {
-            Task {
-                let urls = await Self.walkAndSort(restoredFolder, recursive: loadedRecursively, sort: photoSort)
-                let newPhotos = urls.filter { !imageURLs.contains($0) }
-                guard !newPhotos.isEmpty else { return }
-                imageURLs.append(contentsOf: newPhotos)
-                imageURLs = Self.sortPhotos(imageURLs, by: photoSort, basePath: basePath)
-            }
-            return
-        }
-        let newURLs = belongsHere.filter { !imageURLs.contains($0) }
-        if newURLs.isEmpty { return }
-        imageURLs.append(contentsOf: newURLs)
-        imageURLs = Self.sortPhotos(imageURLs, by: photoSort, basePath: basePath)
-    }
+    func undoTrash() { trash.undoTrash() }
+    var canUndoTrash: Bool { trash.canUndoTrash }
 
     /// Select every photo in the current folder. Bound to ⌘A.
-    func selectAllPhotos() {
-        guard !imageURLs.isEmpty else { return }
-        multiSelection = Set(imageURLs)
-    }
+    func selectAllPhotos() { selection.selectAll() }
 
-    /// Drop the multi-selection back to single-select mode. Bound to Esc
-    /// (when multi is non-empty); falls through to the existing close-
-    /// folder double-tap behavior otherwise.
-    func clearMultiSelection() {
-        multiSelection.removeAll()
-    }
+    /// Drop the multi-selection back to single-select mode.
+    func clearMultiSelection() { selection.clearMultiSelection() }
 
-    /// Move a whole folder to the Trash. UI flow is optimistic: every
-    /// visible-state mutation happens synchronously here on main, BEFORE
-    /// `trashItem` runs, so the folder visibly disappears the instant the
-    /// menu item is clicked. The actual `trashItem` syscall (which on big
-    /// folders can take seconds — Finder XPC call for the trash sound +
-    /// folder size accounting) is fire-and-forget on a background task.
-    /// On failure we surface the error and the user can refresh; the
-    /// alternative (block until trashItem returns, then update UI) was
-    /// what made folder delete feel hung.
+    /// Move a whole folder to the Trash. Delegates to TrashManager with
+    /// additional folder-specific optimistic UI (imageURL pruning, tree
+    /// notification).
     func trashFolder(at url: URL) {
-        let recordID = UUID()
-        pushTrashRecord(TrashRecord(
-            id: recordID,
-            entries: [.init(originalURL: url, trashURL: nil)],
-            isFolder: true,
-            isPending: true
-        ))
-
-        // Optimistic UI updates — all sync on main:
-        if url == folder { closeFolder() }
-        recents.remove(url)
-
-        // Optimistic prune of imageURLs.
+        // Optimistic prune of imageURLs before delegating.
         let trashedPath = url.path
         let prefix = trashedPath.hasSuffix("/") ? trashedPath : trashedPath + "/"
         let beforeCount = imageURLs.count
@@ -811,31 +587,7 @@ final class AppState {
         lastRemovedFolder = url
         folderTreeChangeTick &+= 1
 
-        // Now do the actual filesystem trashItem on a background task,
-        // capturing the resultingItemURL so ⌘Z can move the folder back.
-        // If it fails, surface the error on main; the UI is already
-        // cleaned up so we just leave it that way (the user can hit
-        // refresh if they think the folder is still there).
-        Task.detached(priority: .userInitiated) { [weak self] in
-            var resultURL: NSURL?
-            do {
-                try FileManager.default.trashItem(at: url, resultingItemURL: &resultURL)
-            } catch {
-                await MainActor.run { [weak self] in
-                    self?.completeTrashRecord(id: recordID, trashedEntries: [], failedURLs: [url])
-                    self?.lastError = "Couldn't move folder to Trash: \(error.localizedDescription)"
-                }
-                return
-            }
-            let trashedAt = resultURL as URL?
-            await MainActor.run { [weak self] in
-                self?.completeTrashRecord(
-                    id: recordID,
-                    trashedEntries: [.init(originalURL: url, trashURL: trashedAt)],
-                    failedURLs: []
-                )
-            }
-        }
+        trash.trashFolder(at: url, currentFolder: folder)
     }
 
     /// Close the current album: drop selection + URL list, swap back to the
@@ -856,11 +608,15 @@ final class AppState {
         // (empty) state isn't holding ~480MB of decoded images that the
         // user can't see.
         prefetcher.clear()
+        // Clear thumbnail cache — the new folder has no overlap.
+        ThumbnailLoader.shared.clear()
         folder = nil
         anchorFolder = nil
         imageURLs = []
-        selectedIndex = nil
+        selection.reset()
         loadPhase = nil
+        // Notify listeners (BrowserView) to clear EnhancementState buffers.
+        onFolderClose?()
     }
 
     // Note: no deinit cancel of fileWatcher — main-actor isolation prevents
