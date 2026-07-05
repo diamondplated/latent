@@ -143,6 +143,23 @@ final class EnhancementState {
 
     init() {}
 
+    /// Clear all retained pixel data and cancel in-flight work. Called when
+    /// the user closes a folder so 100MB+ of decoded buffers don't linger.
+    func reset() {
+        cancelPipeline(clearProcessing: true)
+        cancelFullBufferLoad()
+        currentURL = nil
+        originalBuffer = nil
+        enhancedBuffer = nil
+        originalMetadata = nil
+        previewCGImage = nil
+        originalCGImage = nil
+        enhancedCGImage = nil
+        lastError = nil
+        compareMode = .original
+        blinking = false
+    }
+
     // MARK: - Public API
 
     /// Load a photo from disk into the editor and run the pipeline once.

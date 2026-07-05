@@ -1,4 +1,5 @@
 import Foundation
+import os
 import PipelineCore
 import PhotoIO
 import PhotoML
@@ -105,7 +106,8 @@ public actor SearchEngine {
                 await index.upsert(entry)
             } catch {
                 // Don't fail the whole index for one bad file — log and skip.
-                print("photo-search: failed to index \(rel): \(error)")
+                Logger(subsystem: "com.latent.photo-viewer", category: "search")
+                    .error("Failed to index \(rel, privacy: .public): \(error)")
             }
             await progress.indexing(rel, current: i + 1, total: total)
         }
