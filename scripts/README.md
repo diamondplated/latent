@@ -11,10 +11,12 @@ the Lanczos fallback.
 
 Run it:
 
+The converters require Python 3.11 exactly.
+
 ```bash
 cd /path/to/photo-viewer
 
-python3 -m venv .venv-convert
+python3.11 -m venv .venv-convert
 source .venv-convert/bin/activate
 pip install -r scripts/requirements.txt
 

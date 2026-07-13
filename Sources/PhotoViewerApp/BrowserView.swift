@@ -16,6 +16,8 @@ struct BrowserView: View {
     @State private var vimKeymap = VimKeymap()
     @State private var locationCache = PhotoLocationCache()
     @State private var mode: BrowseMode = .grid
+    @State private var showShortcutOverlay = false
+    @FocusState private var viewerFocused: Bool
     /// Hoisted from DetailView so the keypress handler here can drive blink
     /// state (B key down/up) and so the cache survives across mode switches.
     @State private var enhanceState = EnhancementState()
@@ -35,7 +37,13 @@ struct BrowserView: View {
                 .frame(minWidth: 480)
         }
         .focusable()
+        .focused($viewerFocused)
         .focusEffectDisabled()
+        .overlay {
+            if showShortcutOverlay {
+                KeyboardShortcutOverlay(isPresented: $showShortcutOverlay)
+            }
+        }
         // B is special: hold-to-blink the original. Need both `.down` and
         // `.up` phases so we can release the override when the key lifts.
         .onKeyPress(phases: [.down, .up]) { press in handleBlinkKey(press) }
@@ -133,6 +141,9 @@ struct BrowserView: View {
                 Task { await locationCache.locate(state.imageURLs) }
             }
         }
+        .onChange(of: state.selectedIndex) { viewerFocused = true }
+        .onAppear { viewerFocused = true }
+        .onDisappear { enhanceState.reset() }
     }
 
     @ViewBuilder
@@ -290,6 +301,12 @@ struct BrowserView: View {
                             onTrash: { state.trashImage(at: url) }
                         )
                         .id(url)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(url.lastPathComponent)
+                        .accessibilityAction(.default) {
+                            state.multiSelection.removeAll()
+                            state.select(url: url)
+                        }
                         // ⌘-click → toggle this URL in the multi-selection
                         .gesture(
                             TapGesture()
@@ -371,6 +388,7 @@ struct BrowserView: View {
     /// other keys propagate to `handleKey` (the vim dispatcher).
     @MainActor
     private func handleBlinkKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !showShortcutOverlay else { return .ignored }
         guard press.key.character == "b" || press.key.character == "B" else {
             return .ignored
         }
@@ -390,10 +408,26 @@ struct BrowserView: View {
     /// (`.next/.prev/.first/.last/.jumpToMark`).
     @MainActor
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
-        // Arrow keys keep working as before — vim doesn't own them.
+        if showShortcutOverlay {
+            showShortcutOverlay = false
+            return .handled
+        }
+        if press.key.character == "?" {
+            showShortcutOverlay = true
+            return .handled
+        }
+
+        // When the enhancement panel is open, arrows belong to its sliders
+        // and pickers. Vim j/k still navigate photos.
         switch press.key {
-        case .leftArrow, .upArrow:   state.selectPrevious(); return .handled
-        case .rightArrow, .downArrow: state.selectNext(); return .handled
+        case .leftArrow, .upArrow:
+            guard !state.showEnhancementPanel else { return .ignored }
+            state.selectPrevious()
+            return .handled
+        case .rightArrow, .downArrow:
+            guard !state.showEnhancementPanel else { return .ignored }
+            state.selectNext()
+            return .handled
         default: break
         }
 
@@ -454,6 +488,7 @@ struct ThumbnailCell: View {
 
     @State private var image: CGImage? = nil
     @State private var hovered: Bool = false
+    @State private var didFail = false
 
     var body: some View {
         ZStack {
@@ -464,7 +499,14 @@ struct ThumbnailCell: View {
             } else {
                 Rectangle()
                     .fill(.quaternary)
-                    .overlay(ProgressView().controlSize(.small))
+                    .overlay {
+                        if didFail {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
             }
             // Multi-selected tint overlay. Sits ABOVE the image so it
             // visually unifies a bulk selection at a glance (helpful when
@@ -572,9 +614,11 @@ struct ThumbnailCell: View {
         .task(id: url) {
             image = nil
             hovered = false
+            didFail = false
             let thumbnail = await ThumbnailLoader.shared.thumbnail(for: url)
             guard !Task.isCancelled else { return }
             image = thumbnail
+            didFail = thumbnail == nil
         }
     }
 

@@ -18,6 +18,8 @@ enum MediaTyping {
     static let staticImageExts: Set<String> = [
         "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff",
         "webp", "avif", "jxl", "bmp",
+        // RAW formats ImageIO can preview via their embedded JPEG.
+        "cr2", "cr3", "nef", "arw", "raf", "dng", "orf", "rw2",
     ]
     /// Containers commonly used for animated single-file content. We still
     /// inspect frame count via CGImageSource at runtime — a static .png

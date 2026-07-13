@@ -1,13 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// Window-level NSEvent monitor that swallows arrow keys and routes them to
-/// `AppState` selection methods regardless of which control has focus.
+/// Window-level NSEvent monitor that routes arrow keys to `AppState`
+/// selection unless the visible enhancement panel needs native key handling.
 ///
 /// Why this exists: SwiftUI's `.onKeyPress` only fires when the receiving
 /// view (or one of its descendants) has keyboard focus. As soon as the user
-/// clicks a slider in the enhancement panel, focus moves there and arrow
-/// keys start dragging the slider instead of navigating photos. Confusing.
+/// clicks elsewhere in the viewer, focus can move away from the root view and
+/// SwiftUI's `.onKeyPress` stops seeing navigation keys.
 ///
 /// `NSEvent.addLocalMonitorForEvents(matching: .keyDown)` runs before any
 /// view in the window sees the event, so we always get first crack at
@@ -49,8 +49,8 @@ final class NavigationKeyMonitor {
     ///   - Earlier "bail when responder is NSText/NSTextView" matched this
     ///     and let the first arrow/space press through.
     ///   - Now we don't care about responder type at all once a folder is
-    ///     loaded — the only thing arrow/space can mean in viewer mode is
-    ///     "navigate".
+    ///     loaded — arrow/space mean "navigate" unless the enhancement
+    ///     panel is visible, where native controls retain the arrow keys.
     ///
     /// Modal panels (Open, Save) still bail unconditionally so the user can
     /// arrow-key around the sidebar.
@@ -85,6 +85,13 @@ final class NavigationKeyMonitor {
         // Other modifier-laden keys (cmd-left for window-back, opt-arrows
         // for word-jump, etc.) are not ours to claim.
         if !mods.isDisjoint(with: [.command, .control, .option]) {
+            return event
+        }
+
+        // The enhancement panel contains native sliders and pickers whose
+        // standard keyboard interaction uses unmodified arrow keys.
+        if state.showEnhancementPanel,
+           [123, 124, 125, 126].contains(event.keyCode) {
             return event
         }
 

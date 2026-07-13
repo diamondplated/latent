@@ -3,12 +3,26 @@ import PipelineCore
 
 public enum TileExecutorError: Error, CustomStringConvertible {
     case processProducedWrongSize(expected: (Int, Int), got: (Int, Int))
+    case outputTooLarge(outputWidth: Int, outputHeight: Int, estimatedWorkingBytes: UInt64, maxWorkingBytes: UInt64)
+    case outputDimensionsOverflow(inputWidth: Int, inputHeight: Int, scale: Int)
     case bufferAllocationFailed
 
     public var description: String {
         switch self {
         case .processProducedWrongSize(let expected, let got):
             return "process() returned \(got.0)x\(got.1), expected \(expected.0)x\(expected.1)"
+        case .outputTooLarge(let width, let height, let estimatedBytes, let maxBytes):
+            let estimated = ByteCountFormatter.string(
+                fromByteCount: Int64(clamping: estimatedBytes),
+                countStyle: .memory
+            )
+            let maximum = ByteCountFormatter.string(
+                fromByteCount: Int64(clamping: maxBytes),
+                countStyle: .memory
+            )
+            return "Output \(width)x\(height) needs about \(estimated) of working memory; the safety limit is \(maximum). Use a smaller image or lower scale."
+        case .outputDimensionsOverflow(let width, let height, let scale):
+            return "Output dimensions for \(width)x\(height) at \(scale)x scale exceed the supported range. Use a smaller image or lower scale."
         case .bufferAllocationFailed:
             return "Failed to allocate output buffer"
         }
@@ -29,18 +43,31 @@ public enum TileExecutorError: Error, CustomStringConvertible {
 ///
 /// Math is done in Float32 for precision, then quantized to Float16 for storage.
 public struct TileExecutor: Sendable {
+    /// Keep whole-output buffers below one eighth of physical memory, capped at 2 GiB.
+    public static var defaultMaxWorkingMemoryBytes: UInt64 {
+        min(ProcessInfo.processInfo.physicalMemory / 8, 2 * 1024 * 1024 * 1024)
+    }
+
     public let tileSize: Int
     public let overlap: Int
     public let scale: Int
+    public let maxWorkingMemoryBytes: UInt64
 
-    public init(tileSize: Int = 512, overlap: Int = 32, scale: Int = 1) {
+    public init(
+        tileSize: Int = 512,
+        overlap: Int = 32,
+        scale: Int = 1,
+        maxWorkingMemoryBytes: UInt64 = TileExecutor.defaultMaxWorkingMemoryBytes
+    ) {
         precondition(tileSize > 0, "tileSize must be positive")
         precondition(overlap >= 0, "overlap must be non-negative")
         precondition(overlap * 2 < tileSize, "overlap (\(overlap)) must be less than half of tileSize (\(tileSize))")
         precondition(scale >= 1, "scale must be >= 1")
+        precondition(maxWorkingMemoryBytes > 0, "maxWorkingMemoryBytes must be positive")
         self.tileSize = tileSize
         self.overlap = overlap
         self.scale = scale
+        self.maxWorkingMemoryBytes = maxWorkingMemoryBytes
     }
 
     public func execute(
@@ -50,15 +77,41 @@ public struct TileExecutor: Sendable {
     ) async throws -> ImageBuffer {
         precondition(input.format == .working, "TileExecutor requires working format")
 
+        let (outWResult, widthOverflow) = input.width.multipliedReportingOverflow(by: scale)
+        let (outHResult, heightOverflow) = input.height.multipliedReportingOverflow(by: scale)
+        guard !widthOverflow, !heightOverflow else {
+            throw TileExecutorError.outputDimensionsOverflow(
+                inputWidth: input.width,
+                inputHeight: input.height,
+                scale: scale
+            )
+        }
+        let outW = outWResult
+        let outH = outHResult
+
+        // Account for the Float32 RGBA accumulator, Float32 weights, and
+        // Float16 RGBA output before either path asks a model for pixels.
+        let (pixelCount64, pixelCountOverflow) = UInt64(outW).multipliedReportingOverflow(by: UInt64(outH))
+        let bytesPerPixel = UInt64(MemoryLayout<Float>.size * 5 + ImageFormat.working.bytesPerPixel)
+        let (estimatedBytes, byteCountOverflow) = pixelCount64.multipliedReportingOverflow(by: bytesPerPixel)
+        guard !pixelCountOverflow,
+              !byteCountOverflow,
+              estimatedBytes <= maxWorkingMemoryBytes else {
+            throw TileExecutorError.outputTooLarge(
+                outputWidth: outW,
+                outputHeight: outH,
+                estimatedWorkingBytes: pixelCountOverflow || byteCountOverflow ? .max : estimatedBytes,
+                maxWorkingBytes: maxWorkingMemoryBytes
+            )
+        }
+
         // Fast path: input fits in a single tile, no tiling needed.
         if input.width <= tileSize && input.height <= tileSize {
             progress.report(0.0)
             let output = try await process(input)
-            let expectedW = input.width * scale
-            let expectedH = input.height * scale
-            guard output.width == expectedW, output.height == expectedH else {
+            guard output.width == outW, output.height == outH else {
                 throw TileExecutorError.processProducedWrongSize(
-                    expected: (expectedW, expectedH),
+                    expected: (outW, outH),
                     got: (output.width, output.height)
                 )
             }
@@ -72,11 +125,8 @@ public struct TileExecutor: Sendable {
         let tilesY = max(1, Int((Double(input.height - overlap) / Double(stride)).rounded(.up)))
         let totalTiles = tilesX * tilesY
 
-        let outW = input.width * scale
-        let outH = input.height * scale
-
         // Accumulator and weight buffers in Float32.
-        let pixelCount = outW * outH
+        let pixelCount = Int(pixelCount64)
         var accum = [Float](repeating: 0, count: pixelCount * 4)  // RGBA
         var weights = [Float](repeating: 0, count: pixelCount)
 

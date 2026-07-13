@@ -6,7 +6,7 @@
 # register CFBundleDocumentTypes — i.e., to make photo-viewer appear in
 # Finder's "Open With…" menu for image files.
 #
-# Output: ./build/PhotoViewerApp.app — drop into /Applications or run in place.
+# Output: ./build/Latent.app — drop into /Applications or run in place.
 #
 # When the project migrates to an Xcode workspace this script gets retired:
 # Xcode produces the .app via xcodebuild and adds code signing + the QL
@@ -51,7 +51,16 @@ else
     echo "warning: Latent.icns missing — run 'swift scripts/generate_icon.swift'" >&2
 fi
 
-# 4. Touch the bundle so Launch Services re-reads it. Without this, Finder
+# 4. Bundle any locally converted AI assets. These directories are mostly
+# gitignored, so a build without local models stays small; a build with them
+# remains functional after the app moves away from this source checkout.
+for resource_dir in Models Tokenizer; do
+    if [[ -d "Resources/$resource_dir" ]]; then
+        cp -R "Resources/$resource_dir" "$APP_DIR/Contents/Resources/$resource_dir"
+    fi
+done
+
+# 5. Touch the bundle so Launch Services re-reads it. Without this, Finder
 #    sometimes serves a stale Info.plist from its cache and won't show the
 #    app in "Open With…".
 touch "$APP_DIR"

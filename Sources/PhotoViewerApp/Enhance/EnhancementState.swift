@@ -148,6 +148,7 @@ final class EnhancementState {
     func reset() {
         cancelPipeline(clearProcessing: true)
         cancelFullBufferLoad()
+        Task { await cache.clear() }
         currentURL = nil
         originalBuffer = nil
         enhancedBuffer = nil
@@ -187,15 +188,15 @@ final class EnhancementState {
         cancelPipeline(clearProcessing: true)
         cancelFullBufferLoad()
 
-        // KEY: do NOT nil the previous photo's NSImages here. Keep showing
-        // the last image while the new one decodes. When the new preview
-        // lands the swap is instant, no skeleton flash, no fade-from-black.
-        // Buffers are nilled because `runPipeline` would otherwise try to
-        // re-process the OLD buffer with the new params.
+        // Never show the previous photo under the new filename/actions. A
+        // prefetch hit replaces these immediately; a miss shows a skeleton.
         currentURL = url
         originalBuffer = nil
         enhancedBuffer = nil
         originalMetadata = nil
+        previewCGImage = nil
+        originalCGImage = nil
+        enhancedCGImage = nil
         lastError = nil
 
         // Prefetch fast path: caller (the BrowserView selection handler)
@@ -218,11 +219,7 @@ final class EnhancementState {
         // RGB, etc.), so passing it straight into SwiftUI's Image view
         // means wide-gamut photos stay in their gamut on capable displays.
         async let previewTask: CGImage? = Task.detached(priority: .userInitiated) {
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-                return nil
-            }
-            return cg
+            ImageReader.previewCGImage(url: url)
         }.value
 
         // Apply the preview first so the UI swaps to the new photo
@@ -232,8 +229,9 @@ final class EnhancementState {
         let preview = await previewTask
         if myGen == loadGeneration {
             previewCGImage = preview
-            originalCGImage = nil
-            enhancedCGImage = nil
+            if preview == nil, MediaTyping.detect(url) == .staticImage {
+                lastError = "Couldn't open \(url.lastPathComponent)."
+            }
         }
 
         // Phase 2: full pipeline-ready buffer + metadata. Only kick this off
@@ -333,6 +331,8 @@ final class EnhancementState {
 
         isProcessing = true
         lastError = nil
+        enhancedBuffer = nil
+        enhancedCGImage = nil
 
         pipelineTask = Task { [weak self] in
             // Run off the main actor — Pipeline.run is async but the
@@ -364,19 +364,26 @@ final class EnhancementState {
             lastError = "Nothing to save."
             return
         }
+        let savingGeneration = loadGeneration
         // Lazy-load the heavy buffer if we don't have it yet. Apply & Save
         // works even when the user has been browsing in .original mode.
         if originalBuffer == nil {
-            await loadFullBuffer(url: url, generation: loadGeneration)
-            // Wait for any pipeline triggered by loadFullBuffer to complete.
-            await pipelineTask?.value
+            await loadFullBuffer(url: url, generation: savingGeneration)
         }
+        // Slider edits replace the running task. Keep waiting until the latest
+        // run settles, then bind the export to the image that was clicked.
+        while let task = pipelineTask {
+            await task.value
+            guard currentURL == url, loadGeneration == savingGeneration else { return }
+        }
+        guard currentURL == url, loadGeneration == savingGeneration else { return }
+        guard lastError == nil else { return }
         guard let buffer = enhancedBuffer ?? originalBuffer else {
             lastError = "Failed to load image for save."
             return
         }
-        let dest = Self.outputURL(for: url)
         let metadata = originalMetadata
+        let dest = Self.outputURL(for: url, sourceFormat: metadata?.sourceFormat)
         let writer = self.writer
 
         let writeResult: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
@@ -388,6 +395,7 @@ final class EnhancementState {
             }
         }.value
 
+        guard currentURL == url, loadGeneration == savingGeneration else { return }
         switch writeResult {
         case .success:
             lastError = nil
@@ -398,10 +406,13 @@ final class EnhancementState {
 
     /// Output URL for `Apply & Save`: `<dir>/<stem>_enhanced.<ext>`. Keeps the
     /// file in the source folder so the existing folder watcher picks it up.
-    static func outputURL(for source: URL) -> URL {
+    static func outputURL(for source: URL, sourceFormat: ImageFileFormat?) -> URL {
         let dir = source.deletingLastPathComponent()
         let stem = source.deletingPathExtension().lastPathComponent
-        let ext = source.pathExtension.isEmpty ? "jpg" : source.pathExtension
+        let sourceExtension = source.pathExtension
+        let ext = sourceFormat == nil || sourceExtension.isEmpty
+            ? sourceFormat?.preferredFilenameExtension ?? "jpg"
+            : sourceExtension
         return dir.appendingPathComponent("\(stem)_enhanced.\(ext)")
     }
 
