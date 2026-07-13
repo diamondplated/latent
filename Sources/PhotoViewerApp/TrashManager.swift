@@ -8,6 +8,8 @@ import Foundation
 @MainActor
 @Observable
 final class TrashManager {
+    private static let pendingFolderMessage = "Wait for the current folder move to finish."
+
     /// One trash operation, undoable as a unit. Bulk trashes hold many
     /// entries; folder trashes hold one (the folder root). `trashURL` is
     /// the post-trash location (`~/.Trash/photo.jpg` typically) — undo
@@ -73,6 +75,11 @@ final class TrashManager {
     func trashImages(_ urls: [URL]) {
         let ordered = uniqueURLs(urls)
         guard !ordered.isEmpty else { return }
+        lastError = nil
+        guard !ordered.contains(where: isInsidePendingFolder) else {
+            lastError = Self.pendingFolderMessage
+            return
+        }
 
         let recordID = UUID()
         pushTrashRecord(TrashRecord(
@@ -106,7 +113,12 @@ final class TrashManager {
     }
 
     /// Move a whole folder to the Trash.
-    func trashFolder(at url: URL, currentFolder: URL?) {
+    func trashFolder(at url: URL) {
+        lastError = nil
+        guard !overlapsPendingFolder(url) else {
+            lastError = Self.pendingFolderMessage
+            return
+        }
         let recordID = UUID()
         pushTrashRecord(TrashRecord(
             id: recordID,
@@ -114,9 +126,6 @@ final class TrashManager {
             isFolder: true,
             isPending: true
         ))
-
-        if url == currentFolder { onFolderTrashed?(url) }
-        onRemoveRecent?(url)
 
         Task.detached(priority: .userInitiated) { [weak self] in
             var resultURL: NSURL?
@@ -131,11 +140,18 @@ final class TrashManager {
             }
             let trashedAt = resultURL as URL?
             await MainActor.run { [weak self] in
-                self?.completeTrashRecord(
+                guard let self else { return }
+                if self.lastError == Self.pendingFolderMessage { self.lastError = nil }
+                self.completeTrashRecord(
                     id: recordID,
                     trashedEntries: [.init(originalURL: url, trashURL: trashedAt)],
                     failedURLs: []
                 )
+                // Pending undo may already have restored the folder. Commit UI
+                // removal only when the source path is actually gone.
+                guard !FileManager.default.fileExists(atPath: url.path) else { return }
+                self.onFolderTrashed?(url)
+                self.onRemoveRecent?(url)
             }
         }
     }
@@ -143,9 +159,9 @@ final class TrashManager {
     /// Undo the most recent trash operation.
     func undoTrash() {
         guard let idx = trashHistory.indices.last(where: { !trashHistory[$0].undoRequested }) else { return }
+        lastError = nil
         if trashHistory[idx].isPending {
             trashHistory[idx].undoRequested = true
-            lastError = "Trash is still finishing; restore will run as soon as macOS gives us the Trash URL."
             return
         }
         let record = trashHistory.remove(at: idx)
@@ -164,6 +180,29 @@ final class TrashManager {
         return out
     }
 
+    private func isInsidePendingFolder(_ url: URL) -> Bool {
+        trashHistory.contains { record in
+            record.isFolder && record.isPending
+                && record.entries.contains { isSameOrDescendant(url, of: $0.originalURL) }
+        }
+    }
+
+    private func overlapsPendingFolder(_ url: URL) -> Bool {
+        trashHistory.contains { record in
+            record.isFolder && record.isPending && record.entries.contains {
+                isSameOrDescendant(url, of: $0.originalURL)
+                    || isSameOrDescendant($0.originalURL, of: url)
+            }
+        }
+    }
+
+    private func isSameOrDescendant(_ candidate: URL, of directory: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        let prefix = directoryPath.hasSuffix("/") ? directoryPath : directoryPath + "/"
+        return candidatePath == directoryPath || candidatePath.hasPrefix(prefix)
+    }
+
     private func pushTrashRecord(_ record: TrashRecord) {
         trashHistory.append(record)
         if trashHistory.count > trashHistoryCap {
@@ -177,13 +216,13 @@ final class TrashManager {
     }
 
     private func completeTrashRecord(id: UUID, trashedEntries: [TrashRecord.Entry], failedURLs: [URL]) {
+        guard let idx = trashHistory.firstIndex(where: { $0.id == id }) else { return }
+
         if !failedURLs.isEmpty {
             lastError = "Couldn't trash: \(failedURLs.prefix(3).map(\.lastPathComponent).joined(separator: ", "))"
                 + (failedURLs.count > 3 ? " (+\(failedURLs.count - 3) more)" : "")
-            onReinsertURLs?(failedURLs)
+            if !trashHistory[idx].isFolder { onReinsertURLs?(failedURLs) }
         }
-
-        guard let idx = trashHistory.firstIndex(where: { $0.id == id }) else { return }
 
         let completedByURL = Dictionary(uniqueKeysWithValues: trashedEntries.map { ($0.originalURL, $0) })
         var record = trashHistory[idx]
@@ -209,6 +248,7 @@ final class TrashManager {
     }
 
     private func restoreTrashRecord(_ record: TrashRecord) {
+        lastError = nil
         var restored: [URL] = []
         var failed: [String] = []
         let fm = FileManager.default

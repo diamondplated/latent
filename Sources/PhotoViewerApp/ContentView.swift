@@ -23,6 +23,7 @@ struct ContentView: View {
                 } label: {
                     Label("Open Folder…", systemImage: "folder")
                 }
+                .keyboardShortcut("o", modifiers: .command)
             }
         }
         .onAppear { keyMonitor.install(state: state) }
@@ -42,6 +43,17 @@ struct ContentView: View {
             guard let first = urls.first else { return false }
             Task { await openExternal(url: first) }
             return true
+        }
+        .alert(
+            "Latent couldn’t complete that action",
+            isPresented: Binding(
+                get: { state.userError != nil },
+                set: { if !$0 { state.clearUserError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) { state.clearUserError() }
+        } message: {
+            Text(state.userError ?? "")
         }
     }
 
@@ -90,7 +102,6 @@ struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
             Button("Open Folder…") { state.openFolder() }
                 .controlSize(.large)
-                .keyboardShortcut("o", modifiers: .command)
                 .padding(.top, 8)
         }
     }

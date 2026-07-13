@@ -38,6 +38,33 @@ public enum ImageReadError: Error, CustomStringConvertible {
 public struct ImageReader: Sendable {
     public init() {}
 
+    /// Decode the primary image at full resolution with EXIF orientation
+    /// applied to the returned pixels.
+    public static func previewCGImage(url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+        guard CGImageSourceGetCount(source) > 0 else {
+            return nil
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        let width = properties[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let height = properties[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let maxDimension = max(width, height)
+        guard maxDimension > 0 else {
+            return nil
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
     public func read(url: URL) throws -> (ImageBuffer, ImageMetadata) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ImageReadError.sourceCreationFailed(url)

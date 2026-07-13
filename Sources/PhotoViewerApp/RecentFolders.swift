@@ -1,16 +1,15 @@
 import Foundation
 import SwiftUI
 
-/// Persisted MRU list of folders the user has opened. Stored as plain paths
-/// in UserDefaults — when we ship as a sandboxed Mac App Store app, swap to
-/// security-scoped bookmarks so we still have read access to user-picked
-/// folders across launches.
+/// Persisted MRU list of folders and archives the user has opened. Stored as
+/// plain paths in UserDefaults — when we ship as a sandboxed Mac App Store app,
+/// swap to security-scoped bookmarks so we still have read access across launches.
 @MainActor
 @Observable
 final class RecentFolders {
     /// Most-recent first. Capped at `maxEntries`.
     private(set) var entries: [URL] = []
-    /// Cached file-existence flag per entry so a stale row (folder moved /
+    /// Cached file-existence flag per entry so a stale row (path moved /
     /// deleted) renders dimmed without doing fs work in the view body. Recomputed
     /// in `refreshExistence()` whenever the list mutates or the empty state
     /// becomes visible.
@@ -33,8 +32,8 @@ final class RecentFolders {
         }
     }
 
-    /// Push a freshly-opened folder to the front of the list. Idempotent
-    /// against duplicates — re-opening a folder moves it to the top.
+    /// Push a freshly-opened path to the front of the list. Idempotent
+    /// against duplicates — re-opening it moves it to the top.
     func push(_ url: URL) {
         let canonical = url.standardizedFileURL
         entries.removeAll { $0.standardizedFileURL == canonical }
@@ -62,7 +61,8 @@ final class RecentFolders {
         save()
     }
 
-    /// Re-stat each entry on disk; flag any whose folder is gone. Run off
+    /// Re-stat each entry on disk; flag any whose path is gone. Entries may
+    /// be folders or archives, so existence alone determines freshness. Run off
     /// the main actor so the iteration over recents doesn't block. Results
     /// are applied back on main when done, which @Observable picks up and
     /// propagates to the view.
@@ -72,9 +72,7 @@ final class RecentFolders {
             var found = Set<URL>()
             let fm = FileManager.default
             for url in urls {
-                var isDir: ObjCBool = false
-                let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
-                if !exists || !isDir.boolValue { found.insert(url) }
+                if !fm.fileExists(atPath: url.path) { found.insert(url) }
             }
             return found
         }.value

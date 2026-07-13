@@ -57,9 +57,6 @@ final class AppState {
     /// window is updated by BrowserView when selectedIndex changes.
     let prefetcher = ImagePrefetcher(capacity: 5)
 
-    /// Callback invoked when the folder is closed. Used by BrowserView to
-    /// reset EnhancementState so pixel buffers don't leak.
-    var onFolderClose: (() -> Void)?
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
     var showEnhancementPanel: Bool = false
@@ -116,7 +113,7 @@ final class AppState {
             self?.prefetcher.evict(url: url)
         }
         trash.onFolderTrashed = { [weak self] url in
-            self?.closeFolder()
+            self?.handleFolderTrashSuccess(url)
         }
         trash.onRemoveRecent = { [weak self] url in
             self?.recents.remove(url)
@@ -124,11 +121,21 @@ final class AppState {
         trash.onRestoreFolder = { [weak self] url in
             guard let self else { return }
             Task {
-                let urls = await Self.walkAndSort(url, recursive: self.loadedRecursively, sort: self.photoSort)
-                let newPhotos = urls.filter { !self.imageURLs.contains($0) }
-                guard !newPhotos.isEmpty, let basePath = self.folder?.path else { return }
-                self.imageURLs.append(contentsOf: newPhotos)
-                self.imageURLs = Self.sortPhotos(self.imageURLs, by: self.photoSort, basePath: basePath)
+                guard let currentFolder = self.folder else { return }
+                let prefix = currentFolder.path.hasSuffix("/")
+                    ? currentFolder.path
+                    : currentFolder.path + "/"
+                guard url.path == currentFolder.path || url.path.hasPrefix(prefix) else { return }
+                let recursive = self.loadedRecursively
+                let sort = self.photoSort
+                let selectedURL = self.selectedIndex.flatMap { index in
+                    index < self.imageURLs.count ? self.imageURLs[index] : nil
+                }
+                let urls = await Self.walkAndSort(currentFolder, recursive: recursive, sort: sort)
+                guard self.folder == currentFolder else { return }
+                self.imageURLs = urls
+                self.selectedIndex = selectedURL.flatMap { urls.firstIndex(of: $0) }
+                    ?? (urls.isEmpty ? nil : 0)
             }
         }
     }
@@ -156,6 +163,13 @@ final class AppState {
     private var scanGeneration: UInt64 = 0
     var folderTreeChangeTick: Int = 0
     private(set) var lastRemovedFolder: URL? = nil
+
+    var userError: String? { lastError ?? trash.lastError }
+
+    func clearUserError() {
+        lastError = nil
+        trash.lastError = nil
+    }
 
     /// Everything Latent will pick up during a folder scan. Static images,
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
@@ -224,6 +238,9 @@ final class AppState {
     func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = false) async -> Bool {
         scanGeneration &+= 1
         let generation = scanGeneration
+
+        // Prevent the previous folder's watcher from committing into this load.
+        stopWatching()
 
         // If a previous scan is still running (rare — user clicked a new
         // folder mid-scan), cancel it and wait for it to drain. The
@@ -493,6 +510,7 @@ final class AppState {
                 let urls = await Self.walkAndSort(url, recursive: recursive, sort: sort)
                 guard let self else { return }
                 if Task.isCancelled { return }
+                guard self.folder == url else { return }
                 self.imageURLs = urls
                 self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) }
                                     ?? (urls.isEmpty ? nil : 0)
@@ -570,11 +588,13 @@ final class AppState {
     /// Drop the multi-selection back to single-select mode.
     func clearMultiSelection() { selection.clearMultiSelection() }
 
-    /// Move a whole folder to the Trash. Delegates to TrashManager with
-    /// additional folder-specific optimistic UI (imageURL pruning, tree
-    /// notification).
+    /// Move a whole folder to the Trash. UI changes only after macOS confirms
+    /// the filesystem operation succeeded.
     func trashFolder(at url: URL) {
-        // Optimistic prune of imageURLs before delegating.
+        trash.trashFolder(at: url)
+    }
+
+    private func handleFolderTrashSuccess(_ url: URL) {
         let trashedPath = url.path
         let prefix = trashedPath.hasSuffix("/") ? trashedPath : trashedPath + "/"
         let beforeCount = imageURLs.count
@@ -587,7 +607,10 @@ final class AppState {
         lastRemovedFolder = url
         folderTreeChangeTick &+= 1
 
-        trash.trashFolder(at: url, currentFolder: folder)
+        if let currentFolder = folder,
+           currentFolder.path == trashedPath || currentFolder.path.hasPrefix(prefix) {
+            closeFolder()
+        }
     }
 
     /// Close the current album: drop selection + URL list, swap back to the
@@ -615,8 +638,6 @@ final class AppState {
         imageURLs = []
         selection.reset()
         loadPhase = nil
-        // Notify listeners (BrowserView) to clear EnhancementState buffers.
-        onFolderClose?()
     }
 
     // Note: no deinit cancel of fileWatcher — main-actor isolation prevents

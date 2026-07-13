@@ -159,6 +159,20 @@ final class SidecarTests: XCTestCase {
 
 final class CacheTests: XCTestCase {
 
+    func testContentHashIncludesEveryPixelByte() {
+        let width = 512
+        let height = 2
+        let byteCount = width * height * ImageFormat.working.bytesPerPixel
+        let firstPixels = Data(count: byteCount)
+        var secondPixels = firstPixels
+        secondPixels[1] = 0xff
+
+        let first = ImageBuffer(width: width, height: height, format: .working, pixels: firstPixels)
+        let second = ImageBuffer(width: width, height: height, format: .working, pixels: secondPixels)
+
+        XCTAssertNotEqual(first.contentHash, second.contentHash)
+    }
+
     func testLRUEvictsOldestWhenOverBudget() async {
         // Each entry: 16*16*8 = 2048 bytes. Budget for 2 entries.
         let cache = IntermediateCache(maxBytes: 5000)

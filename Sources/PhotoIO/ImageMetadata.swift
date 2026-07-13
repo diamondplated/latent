@@ -85,6 +85,15 @@ public enum ImageFileFormat: Sendable {
     case png
     case tiff
 
+    public var preferredFilenameExtension: String {
+        switch self {
+        case .jpeg: "jpg"
+        case .heic: "heic"
+        case .png: "png"
+        case .tiff: "tiff"
+        }
+    }
+
     var utType: UTType {
         switch self {
         case .jpeg: .jpeg
