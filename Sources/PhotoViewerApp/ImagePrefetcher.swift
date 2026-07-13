@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-import ImageIO
+import PhotoIO
 
 /// In-memory ring cache for full-resolution CGImages around the current
 /// selection. Holds at most `capacity` decoded images; speculatively
@@ -115,9 +115,7 @@ final class ImagePrefetcher {
             // AppKit which can pick a smaller representation and loses the
             // source's color space — we want the full-res CGImage with its
             // native gamut intact, same as EnhancementState's fast preview.
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
-            else {
+            guard let cg = ImageReader.previewCGImage(url: url) else {
                 _ = await MainActor.run { [weak self] in
                     self?.inflight.removeValue(forKey: url)
                 }

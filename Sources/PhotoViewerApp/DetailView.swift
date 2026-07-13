@@ -234,6 +234,15 @@ struct DetailView: View {
             } else if currentURL == nil {
                 Text("Select a photo")
                     .foregroundStyle(.secondary)
+            } else if let error = enhanceState.lastError {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 36))
+                    Text(error)
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(.secondary)
+                .padding()
             } else {
                 PhotoSkeleton()
             }

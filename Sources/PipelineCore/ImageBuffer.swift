@@ -82,17 +82,7 @@ public struct ContentHash: Hashable, Sendable, CustomStringConvertible {
         hasher.combine(width)
         hasher.combine(height)
         hasher.combine(format)
-        // Hashing all pixels would be expensive on large images. Sample 4KB
-        // at deterministic offsets — fine for cache identity (false collisions
-        // produce wrong-but-deterministic cache hits, not crashes).
-        let sampleCount = 4096
-        let stride = max(1, pixels.count / sampleCount)
-        var i = 0
-        while i < pixels.count {
-            hasher.combine(pixels[i])
-            i += stride
-        }
-        hasher.combine(pixels.count)
+        hasher.combine(pixels)
         self.value = UInt64(bitPattern: Int64(hasher.finalize()))
     }
 

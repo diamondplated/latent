@@ -94,6 +94,12 @@ public actor ArchiveExtractor {
             throw ArchiveError.unsupportedFormat(archiveURL.pathExtension)
         }
         let dest = try makeTempDir(for: archiveURL)
+        var extracted = false
+        defer {
+            if !extracted {
+                try? FileManager.default.removeItem(at: dest)
+            }
+        }
 
         switch format {
         case .zip:
@@ -151,6 +157,7 @@ public actor ArchiveExtractor {
             try await runProcess(tool: sevenzz, args: ["x", archiveURL.path, "-o" + dest.path, "-y", "-bso0", "-bsp0"], inputArchive: archiveURL)
         }
 
+        extracted = true
         return dest
     }
 
@@ -211,7 +218,7 @@ public actor ArchiveExtractor {
         return dest
     }
 
-    private func runProcess(tool: String, args: [String], inputArchive: URL) async throws {
+    func runProcess(tool: String, args: [String], inputArchive: URL) async throws {
         guard FileManager.default.isExecutableFile(atPath: tool) else {
             throw ArchiveError.toolMissing(tool)
         }
@@ -222,9 +229,14 @@ public actor ArchiveExtractor {
 
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
-        process.standardOutput = Pipe()  // discard stdout
+        process.standardOutput = FileHandle.nullDevice
 
         try process.run()
+
+        let stderrHandle = stderrPipe.fileHandleForReading
+        let stderrTask = Task.detached {
+            (try? stderrHandle.readToEnd()) ?? Data()
+        }
 
         // Wait synchronously off the actor's executor by hopping to a Task.
         // Process.waitUntilExit() blocks the calling thread.
@@ -232,8 +244,8 @@ public actor ArchiveExtractor {
             process.waitUntilExit()
         }.value
 
+        let stderrData = await stderrTask.value
         if process.terminationStatus != 0 {
-            let stderrData = (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data()
             let stderr = String(data: stderrData, encoding: .utf8) ?? "(no stderr)"
             throw ArchiveError.extractionFailed(inputArchive, process.terminationStatus, stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }

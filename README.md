@@ -25,7 +25,7 @@ What's working:
 - ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` / `CLIPTextEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), Swift BPE tokenizer, and `SearchEngine` folder indexing with image-image and text queries when converted model/tokenizer assets are installed.
 - ✅ `PhotoViewerApp` — SwiftUI app: folder picker → thumbnail grid (with color labels, picks/rejects from vim) ↔ map view → detail view with vim keymap (j/k/gg/G/marks/picks/labels), in-app pipeline UI (per-stage toggles + sliders + live preview), A/B compare (enhanced / original / side-by-side, hold-B blink), synced zoom/pan (0.25–16×, drag to pan, pinch to zoom, double-tap reset).
 - ✅ `PhotoQuickLook` — `QuickLookRenderer` using ImageIO's downsample fast path. Ready for an Xcode-based QL extension target to import directly.
-- ✅ `scripts/build_app.sh` — packages a real `.app` bundle from `swift build` output. Info.plist registers photo-viewer as a viewer for JPEG/HEIC/PNG/TIFF/RAW etc. so Finder offers `Open With → photo-viewer`.
+- ✅ `scripts/build_app.sh` — packages a real `.app` bundle from `swift build` output, including locally converted model/tokenizer assets. Info.plist registers Latent as a viewer for JPEG/HEIC/PNG/TIFF/RAW etc. so Finder offers `Open With → Latent`.
 - ✅ `pv-pipeline` CLI — self-verification scenarios for cache behavior, sidecars, image I/O, tiling, search primitives, vim state, GPS, Quick Look, and archive extraction
 
 Still rough:
@@ -150,7 +150,7 @@ In order of dependency:
 4. ~~**SwiftUI app shell**~~ — minimal version done; folder picker, thumbnail grid, detail view, arrow nav.
 
 5. ~~**CLIP BPE tokenizer in Swift**~~ — done. `CLIPBPETokenizer` ports `simple_tokenizer.py`. Run `convert_openclip.py` to populate the merges file.
-6. ~~**SwiftUI app polish**~~ (most) — done. Vim keymap, A/B compare, synced zoom/pan, map view, in-app pipeline UI all wired. Remaining: status-bar progress, keybind cheatsheet (?), Metal-backed renderer for proper HDR/wide-gamut display.
+6. ~~**SwiftUI app polish**~~ (most) — done. Vim keymap, keybind cheatsheet, A/B compare, synced zoom/pan, map view, in-app pipeline UI all wired. Remaining: status-bar progress and a Metal-backed renderer for proper HDR/wide-gamut display.
 7. **Migrate to Xcode project** (1-2 weeks) — proper bundle (today the `build_app.sh` script gets close, but Xcode handles code signing, sandbox entitlements, app icon, App Store packaging, and notarization). Adding the Quick Look extension target lives in this milestone — `PhotoQuickLook.QuickLookRenderer` is already shipped and ready to import.
 8. **System integration** (2-3 weeks) — Quick Look extension target (built atop `PhotoQuickLook`), drag in/out from Finder, default-app registration ranking (today: `LSHandlerRank=Alternate`).
 9. **Polish + beta** (4-6 weeks) — perf tuning on real 50MP+ images, lazy-download flow for models, App Store submission.
