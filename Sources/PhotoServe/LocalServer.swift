@@ -198,9 +198,17 @@ public actor LocalServer {
     /// arrive is the peer hanging up. Without this a closed tab sits in
     /// CLOSE_WAIT until the next broadcast happens to fail, which for a phone
     /// that is simply idle could be never.
+    ///
+    /// Exactly one `receive` is armed, and *any* callback closes the
+    /// connection — no filtering on `isComplete`, and deliberately no
+    /// re-arming. Filtering was the bug: a peer that sent one stray byte fired
+    /// the callback with neither completion nor error, fell through, and left
+    /// close detection dead for the life of that connection. Re-arming instead
+    /// would restore the spin this server has already been bitten by. Since a
+    /// write here is either a hangup or a peer breaking the contract, dropping
+    /// it on any callback at all is both correct and the smaller rule.
     private func watchForPeerClose(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] _, _, isComplete, error in
-            guard isComplete || error != nil else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] _, _, _, _ in
             Task { await self?.close(connection) }
         }
     }
