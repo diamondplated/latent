@@ -72,7 +72,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "PhotoViewerApp",
-            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoViewerCore", "PhotoGeo", "PhotoServe"],
+            dependencies: ["PipelineCore", "EnhancementStages", "PhotoIO", "PhotoML", "PhotoSearch", "PhotoViewerCore", "PhotoGeo", "PhotoServe"],
             path: "Sources/PhotoViewerApp"
         ),
         .testTarget(

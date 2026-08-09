@@ -40,11 +40,32 @@
   }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header p { margin: 2px 0 0; font-size: 12px; color: var(--dim); }
-  header button {
+  header #refresh {
     all: unset;
     display: block;
     width: 100%;
     cursor: pointer;
+  }
+
+  #search { display: flex; gap: 8px; margin-top: 10px; }
+  #search input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #17171b;
+    color: var(--fg);
+    font: inherit;
+    -webkit-appearance: none;
+  }
+  #search button {
+    all: unset;
+    cursor: pointer;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: #26262b;
+    font-size: 13px;
   }
 
   #status {
@@ -238,6 +259,11 @@
     <h1 id="folder-name"></h1>
     <p id="folder-count"></p>
   </button>
+  <form id="search" hidden>
+    <input id="q" type="search" placeholder="Search this folder" autocomplete="off"
+           autocorrect="off" autocapitalize="none" enterkeyhint="search">
+    <button id="search-clear" type="button" hidden>Clear</button>
+  </form>
 </header>
 
 <div id="status">Starting…</div>
@@ -298,6 +324,11 @@ const TOKEN_KEY = "latent.deviceToken";
 
 let authToken = localStorage.getItem(TOKEN_KEY);
 let folderID = null;
+// Everything the folder holds, and the slice currently on screen. A search
+// narrows `photos` to objects drawn from `allPhotos` — the same objects, not
+// copies — so a live update from the Mac lands on the photo whether or not the
+// current search happens to be showing it.
+let allPhotos = [];
 let photos = [];
 let index = 0;
 let viewerOpen = false;
@@ -310,6 +341,9 @@ const viewerEl = el("viewer");
 const previewEl = el("preview");
 const labelsEl = el("labels");
 const toastEl = el("toast");
+const searchEl = el("search");
+const queryEl = el("q");
+const clearEl = el("search-clear");
 
 // ---------------------------------------------------------------------------
 // Swipe resolution
@@ -364,9 +398,11 @@ function expirePairing() {
   // rather than left to hammer the Mac.
   closeEventStream();
   closeViewer();
+  allPhotos = [];
   photos = [];
   gridEl.replaceChildren();
   headEl.hidden = true;
+  hideSearch();
   showStatus("Pairing expired. Scan the QR on your Mac again.");
 }
 
@@ -576,6 +612,50 @@ async function loadFolder() {
   el("folder-name").textContent = folder.name;
   headEl.hidden = false;
   await loadPhotos();
+  // Not awaited: the first probe can wait on the Mac loading a CLIP model, and
+  // the grid should not sit behind that. It only ever reveals the search box,
+  // so arriving late costs nothing.
+  probeSearch(folderID);
+}
+
+/// Ask once, per folder, whether this folder can be searched at all. The route
+/// 404s when the Mac has no embedding index for it — the usual case, since
+/// Latent ships no model weights — and then the box stays hidden rather than
+/// offering a search that could only ever come back empty. A folder that has
+/// an index shows the box for as long as it is the folder on screen.
+async function probeSearch(forFolderID) {
+  hideSearch();
+  try {
+    await api("/api/search/" + encodeURIComponent(forFolderID) + "?q=test");
+  } catch (e) {
+    return;   // 404, or the Mac went away; either way there is no box to show
+  }
+  // A folder change during the probe answers for a folder nobody is looking at.
+  if (folderID !== forFolderID) return;
+  searchEl.hidden = false;
+}
+
+function hideSearch() {
+  searchEl.hidden = true;
+  clearEl.hidden = true;
+  queryEl.value = "";
+}
+
+/// Draw whatever is in `photos` — the whole folder, or a search result.
+function renderList(countText, emptyText) {
+  el("folder-count").textContent = countText;
+  if (photos.length === 0) {
+    closeViewer();
+    gridEl.replaceChildren();
+    showStatus(emptyText);
+    return;
+  }
+  hideStatus();
+  renderGrid();
+}
+
+function folderCountText() {
+  return photos.length === 1 ? "1 photo" : photos.length + " photos";
 }
 
 async function loadPhotos() {
@@ -594,22 +674,20 @@ async function loadPhotos() {
   // and the next swipe posts an action for a photo nobody is looking at.
   const open = viewerOpen ? photos[index] : null;
   dropImageCaches();
-  photos = ((data && data.photos) || []).map((p) => ({
+  allPhotos = ((data && data.photos) || []).map((p) => ({
     id: String(p.id),
     name: String(p.name),
     picked: !!p.picked,
     rejected: !!p.rejected,
     label: Number(p.label) || 0
   }));
-  el("folder-count").textContent = photos.length === 1 ? "1 photo" : photos.length + " photos";
-  if (photos.length === 0) {
-    closeViewer();
-    gridEl.replaceChildren();
-    showStatus("This folder has no photos in it yet.");
-    return;
-  }
-  hideStatus();
-  renderGrid();
+  photos = allPhotos;
+  // A reload re-mints every photo ID on the Mac, so the IDs a search returned
+  // are already dead. The filter drops rather than showing stale ranks.
+  clearEl.hidden = true;
+  queryEl.value = "";
+  renderList(folderCountText(), "This folder has no photos in it yet.");
+  if (photos.length === 0) return;
   if (open) {
     // Prefer the id, but fall back to the filename. The Mac re-mints every
     // photo id whenever it re-shares the folder, so an id-only match would
@@ -626,6 +704,44 @@ async function loadPhotos() {
       showPhoto();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+async function runSearch(query) {
+  if (!query) return clearSearch();
+  let data;
+  try {
+    data = await (await api(
+      "/api/search/" + encodeURIComponent(folderID) + "?q=" + encodeURIComponent(query)
+    )).json();
+  } catch (e) {
+    if (authToken) toast("That search did not come back.");
+    return;
+  }
+  // The Mac ranks these by similarity, so the order *is* the answer — they go
+  // on screen in the order they arrived, not in folder order.
+  const byID = new Map(allPhotos.map((p) => [p.id, p]));
+  photos = ((data && data.photoIDs) || [])
+    .map((id) => byID.get(String(id)))
+    .filter((p) => p !== undefined);
+  closeViewer();
+  clearEl.hidden = false;
+  queryEl.blur();   // put the phone keyboard away before the grid redraws
+  renderList(
+    photos.length === 1 ? "1 match" : photos.length + " matches",
+    "Nothing in this folder matched that."
+  );
+}
+
+function clearSearch() {
+  queryEl.value = "";
+  clearEl.hidden = true;
+  photos = allPhotos;
+  closeViewer();
+  renderList(folderCountText(), "This folder has no photos in it yet.");
 }
 
 // ---------------------------------------------------------------------------
@@ -654,7 +770,10 @@ function openEventStream() {
   events.addEventListener("photo", (e) => {
     let update;
     try { update = JSON.parse(e.data); } catch (err) { return; }
-    const photo = photos.find((p) => p.id === update.id);
+    // Against the whole folder, not the visible slice: a search can be hiding
+    // the photo the Mac just changed, and it still has to be right when the
+    // search is cleared.
+    const photo = allPhotos.find((p) => p.id === update.id);
     // An ID this screen has never heard of means the Mac re-minted them —
     // the `reload` that follows is what fixes that, not this frame.
     if (!photo) return;
@@ -975,6 +1094,19 @@ el("refresh").addEventListener("click", () => {
   if (!authToken) return;
   openEventStream();
   loadFolder();
+});
+
+// A form, so Return on the phone keyboard submits without any of this having
+// to know about key codes.
+searchEl.addEventListener("submit", (e) => {
+  e.preventDefault();
+  runSearch(queryEl.value.trim());
+});
+clearEl.addEventListener("click", clearSearch);
+// `type="search"` gives iOS and Android their own clear button, which empties
+// the field without submitting. Emptying it means "show me the folder again".
+queryEl.addEventListener("search", () => {
+  if (!queryEl.value.trim()) clearSearch();
 });
 
 // A hardware keyboard on an iPad is free once the actions exist.

@@ -46,8 +46,9 @@ files stay exactly where they are, and everything the app can do runs on your ow
 - 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
   your Mac.
 - 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
-- 🚫 **Zero runtime network calls.** The only thing that touches the network is a setup script you
-  run yourself, once, to fetch model weights.
+- 🚫 **Zero runtime network calls by default.** Nothing touches the network unless you ask it to:
+  a setup script you run yourself, once, to fetch model weights — and the optional phone companion
+  below, which you switch on per session and which never leaves your LAN.
 
 ---
 
@@ -138,6 +139,29 @@ Embeddings are OpenCLIP ViT-B/32, 512-dimensional, persisted per folder and stal
 
 ---
 
+## Phone companion (optional, off by default)
+
+Browse and cull a folder from your phone, over your own network. Turn it on, scan the QR code on
+your Mac, and the phone becomes a second input device — swipe up to pick, down to reject, sideways
+to move, long press to set a colour label. Every gesture goes through the same code path a keystroke
+does and lands in the same per-folder sidecar, so the two screens never disagree.
+
+- **Off unless you turn it on.** No listener exists until you do, and it stops when you quit Latent.
+- **Your LAN only.** Connections from outside a private address range are refused. There is no
+  cloud relay and no account, and there is no plan to add one.
+- **One-time pairing.** The QR carries a code that works once and expires in a minute, and the Mac
+  asks you to approve the device before it gets a token. Revoke any device at any time.
+- **Only the folder you share.** The phone sees the folder you have open, not everything Latent has
+  ever opened.
+- **It cannot delete anything.** Picks, rejects, labels and navigation are the whole vocabulary.
+  Trashing stays on the Mac, where `⌘Z` can undo it.
+- **Unencrypted on your local network.** There is no TLS: a self-signed certificate on a LAN makes
+  the browser show a security warning on every launch, and training yourself to click through that
+  warning is worse than the plaintext it would hide. Turn the feature off on networks you do not
+  trust.
+
+---
+
 ## The enhancement pipeline
 
 Five stages, each independently toggleable, each degrading gracefully when its model isn't
@@ -198,6 +222,7 @@ latent/
 │   ├── PhotoIO/               reader/writer, EXIF round-trip, colour-space handling
 │   ├── PhotoML/               tiling, CoreML wrappers, model registry, face detect/composite
 │   ├── PhotoSearch/           embeddings, per-folder index, CLIP encoders, BPE tokenizer
+│   ├── PhotoServe/            LAN listener, routes, pairing, the phone client
 │   ├── PhotoViewerApp/        the SwiftUI app
 │   ├── PhotoQuickLook/        QuickLookRenderer
 │   └── PipelineCLI/           pv-pipeline

@@ -307,8 +307,11 @@ func pairingStoresTokenHashNotToken() async throws {
 actor StubServeDelegate: ServeDelegate {
     var actionsApplied: [(String, PhoneAction)] = []
     var approvalAnswer = true
+    /// Nil is the shipped default: no model weights, so no index, so no search.
+    var searchAnswer: [String]?
 
     func setApprovalAnswer(_ v: Bool) { approvalAnswer = v }
+    func setSearchAnswer(_ v: [String]?) { searchAnswer = v }
 
     func approvePairing(deviceName: String, fromHost: String) async -> Bool { approvalAnswer }
     func folderList() async -> [SharedFolderSummary] {
@@ -326,7 +329,7 @@ actor StubServeDelegate: ServeDelegate {
     func apply(action: PhoneAction, photoID: String) async {
         actionsApplied.append((photoID, action))
     }
-    func search(folderID: String, query: String) async -> [String]? { nil }
+    func search(folderID: String, query: String) async -> [String]? { searchAnswer }
     func recorded() -> [(String, PhoneAction)] { actionsApplied }
 }
 
@@ -443,4 +446,41 @@ func routerRejectsUnknownActionNames() async throws {
     try require(res.status == 400, "unknown action must be rejected, got \(res.status)")
     let recorded = await delegate.recorded()
     try require(recorded.isEmpty, "nothing should have been applied")
+}
+
+func routerHidesSearchWhenTheFolderHasNoIndex() async throws {
+    let pairing = PairingManager()
+    let router = Router(pairing: pairing, delegate: StubServeDelegate())
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    // The delegate says nil when there are no CLIP assets or no index, which is
+    // the shipped default. The phone reads the 404 as "hide the search box" —
+    // not as an error — so this status is load-bearing, not cosmetic.
+    let req = HTTPRequest(parsing: Data("GET /api/search/F1?q=dog HTTP/1.1\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 404, "an unsearchable folder must 404, got \(res.status)")
+
+    let empty = HTTPRequest(parsing: Data("GET /api/search/F1?q= HTTP/1.1\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8))!
+    let emptyRes = await router.handle(empty, from: "192.168.1.9")
+    try require(emptyRes.status == 400, "an empty query must be rejected, got \(emptyRes.status)")
+}
+
+func routerPreservesSearchRankOrder() async throws {
+    let pairing = PairingManager()
+    let delegate = StubServeDelegate()
+    let router = Router(pairing: pairing, delegate: delegate)
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    // Deliberately not sorted: the ranking by similarity is the answer, and the
+    // phone renders the array in the order it arrives.
+    let ranked = ["P9", "P2", "P7"]
+    await delegate.setSearchAnswer(ranked)
+
+    let req = HTTPRequest(parsing: Data("GET /api/search/F1?q=dog HTTP/1.1\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 200, "expected 200, got \(res.status)")
+
+    let json = try JSONSerialization.jsonObject(with: res.body) as? [String: Any]
+    let ids = json?["photoIDs"] as? [String]
+    try require(ids == ranked, "rank order lost on the wire: \(ids ?? [])")
 }

@@ -96,6 +96,12 @@ public actor SharedFolders {
         entries[id]?.url
     }
 
+    /// The folder's root on disk. Only a shared folder's ID resolves, so this
+    /// hands out no path the phone did not already have a photo from.
+    public func folderRoot(for folderID: SharedFolderID) -> URL? {
+        folderRoots[folderID]
+    }
+
     public func photoID(for url: URL) -> String? {
         entries.first(where: { $0.value.url == url })?.key
     }

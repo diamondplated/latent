@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
+import PhotoSearch
 import PhotoServe
 import PhotoViewerCore
 
@@ -50,6 +51,12 @@ actor PhoneAccessController: ServeDelegate {
     /// The folder currently published to the phone. Only ever one, and only
     /// ever the one open on the Mac.
     private var sharedFolder: URL?
+
+    /// The CLIP engine for the folder it was built against. Building one loads
+    /// two CoreML models and parses the folder's whole embedding index, so it
+    /// is kept rather than rebuilt per query. The root is stored with it so a
+    /// folder change retires it without anything having to remember to.
+    private var searchEngine: (root: URL, engine: SearchEngine)?
 
     /// The pairing request currently waiting on a human. `awaitingApproval`
     /// is set before the first suspension point so two concurrent requests
@@ -116,6 +123,7 @@ actor PhoneAccessController: ServeDelegate {
         await shared.unshareAll()
         endpoint = nil
         sharedFolder = nil
+        searchEngine = nil   // turning the feature off releases the CLIP models too
         await MainActor.run { [ui] in
             ui.isEnabled = false
             ui.pairingURL = nil
@@ -305,8 +313,42 @@ actor PhoneAccessController: ServeDelegate {
         }
     }
 
+    /// Nil means "this folder cannot be searched", which is what hides the
+    /// search box on the phone. It is the common answer: Latent ships no model
+    /// weights, so most folders have no embedding index and no CLIP assets to
+    /// build one with. Nothing about that is an error, so nothing is reported
+    /// as one — the box simply never appears.
     func search(folderID: String, query: String) async -> [String]? {
-        nil   // Task 9 implements this.
+        guard let root = await shared.folderRoot(for: folderID) else { return nil }
+
+        // Cheapest question first. A missing index file answers "no" for a
+        // stat() rather than for a CoreML model load, which is the difference
+        // between the common path costing nothing and costing a second.
+        guard let indexFile = try? EmbeddingIndex.indexFileURL(for: root),
+              FileManager.default.fileExists(atPath: indexFile.path)
+        else { return nil }
+
+        var engine: SearchEngine?
+        if let cached = searchEngine, cached.root == root {
+            engine = cached.engine
+        } else if let built = try? await SearchEngine(folderURL: root) {
+            // `init` throws when the OpenCLIP image encoder is missing, so an
+            // index left behind by an older setup still resolves to "no search".
+            searchEngine = (root, built)
+            engine = built
+        }
+        guard let engine,
+              let hits = try? await engine.search(text: query, k: 200)
+        else { return nil }
+
+        // Ranked by similarity, and the ranking is the answer — the phone
+        // renders these in the order they arrive, so it is preserved here.
+        var ids: [String] = []
+        for hit in hits {
+            let url = root.appendingPathComponent(hit.entry.relativePath)
+            if let id = await shared.photoID(for: url) { ids.append(id) }
+        }
+        return ids
     }
 
     // MARK: - Action mapping
