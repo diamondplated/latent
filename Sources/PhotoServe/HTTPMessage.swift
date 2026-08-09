@@ -28,7 +28,7 @@ public struct HTTPRequest: Sendable, Equatable {
     /// to know when to stop reading.
     public static func expectedLength(of buffer: Data) -> Int? {
         guard let headerEnd = headerTerminator(in: buffer) else { return nil }
-        let headerBytes = headerEnd + 4
+        let headerBytes = (headerEnd - buffer.startIndex) + 4
         let head = String(decoding: buffer[..<headerEnd], as: UTF8.self)
         let contentLength = head
             .split(separator: "\r\n")
@@ -75,19 +75,24 @@ public struct HTTPRequest: Sendable, Equatable {
         }
         self.headers = headers
 
-        let bodyStart = buffer.startIndex + headerEnd + 4
+        let bodyStart = headerEnd + 4
         let declared = Int(headers["content-length"] ?? "") ?? 0
         let available = buffer.endIndex - bodyStart
         self.body = declared > 0 ? buffer[bodyStart..<(bodyStart + min(declared, available))] : Data()
     }
 
-    /// Index of the `\r\n\r\n` that ends the header block.
+    /// Absolute `buffer` index of the `\r\n\r\n` that ends the header block.
+    /// `[UInt8](buffer)` is always 0-based regardless of `buffer`'s own
+    /// indices (a `Data` slice does not reindex from zero), so the match
+    /// offset is converted back to `buffer`'s index space here — once, in
+    /// the one place that finds it — rather than leaving every caller to
+    /// remember the `+ buffer.startIndex` conversion itself.
     private static func headerTerminator(in buffer: Data) -> Int? {
         let pattern: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
         let bytes = [UInt8](buffer)
         guard bytes.count >= 4 else { return nil }
         for i in 0...(bytes.count - 4) where Array(bytes[i..<(i + 4)]) == pattern {
-            return i
+            return buffer.startIndex + i
         }
         return nil
     }

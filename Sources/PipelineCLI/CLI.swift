@@ -66,6 +66,7 @@ struct PipelineCLI {
         failures += await runVerification("HTTPRequest: rejects malformed requests", check: httpRejectsMalformedRequests)
         failures += await runVerification("HTTPRequest: expectedLength reports nil until the body is complete", check: httpExpectedLengthDetectsIncompleteRequest)
         failures += await runVerification("HTTPResponse: serializes status line, headers and body", check: httpResponseSerializesStatusAndBody)
+        failures += await runVerification("HTTPRequest: parses correctly from a non-zero-startIndex Data slice", check: httpParsesFromNonZeroStartIndexSlice)
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
         failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)
         failures += await runVerification("QuickLookRenderer: rejects unsupported file extensions", check: quickLookRenderRejectsUnsupported)

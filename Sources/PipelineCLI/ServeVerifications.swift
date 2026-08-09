@@ -48,6 +48,32 @@ func httpExpectedLengthDetectsIncompleteRequest() async throws {
                 "a complete request must report its own byte count")
 }
 
+func httpParsesFromNonZeroStartIndexSlice() async throws {
+    // `headerTerminator` matches against `[UInt8](buffer)`, which is always
+    // 0-based, while `buffer` itself may not be (a `Data` slice keeps its
+    // parent's indices). Pin every read that depends on that offset —
+    // method, path, a header, and the Content-Length body — against a slice
+    // whose startIndex is nonzero, plus expectedLength(of:) on the same slice.
+    let body = #"{"action":"pick"}"#
+    let requestBytes = Data(
+        "POST /api/action?limit=5 HTTP/1.1\r\nHost: 192.168.1.5:8080\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8
+    )
+    let combined = Data([0xFF, 0xFF]) + requestBytes
+    let sliced = combined.dropFirst(2)
+    try require(sliced.startIndex != 0, "test fixture must have a non-zero startIndex, got \(sliced.startIndex)")
+
+    guard let req = HTTPRequest(parsing: sliced) else {
+        throw VerifyError(message: "parse returned nil for a non-zero-startIndex slice")
+    }
+    try require(req.method == "POST", "method = \(req.method)")
+    try require(req.path == "/api/action", "path = \(req.path)")
+    try require(req.headers["host"] == "192.168.1.5:8080", "header lookup failed on a sliced buffer")
+    try require(String(decoding: req.body, as: UTF8.self) == body, "body round-trip failed on a sliced buffer")
+
+    try require(HTTPRequest.expectedLength(of: sliced) == sliced.count,
+                "expectedLength(of:) on a sliced buffer = \(String(describing: HTTPRequest.expectedLength(of: sliced))), expected \(sliced.count)")
+}
+
 func httpResponseSerializesStatusAndBody() async throws {
     let res = HTTPResponse.json(["ok": true])
     let text = String(decoding: res.serialize(), as: UTF8.self)
