@@ -61,6 +61,9 @@ struct PipelineCLI {
         failures += await runVerification("VimKeymap: save/load roundtrip preserves marks/labels/picks") {
             try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
         }
+        failures += await runVerification("VimKeymap: an unreadable state file yields an empty keymap, not the last folder's") {
+            try await Task { @MainActor in try await vimLoadFailureYieldsAnEmptyKeymap() }.value
+        }
         failures += await runVerification("HTTPRequest: parses request line, query and case-insensitive headers", check: httpParsesRequestLineAndHeaders)
         failures += await runVerification("HTTPRequest: reads body per Content-Length", check: httpParsesBodyByContentLength)
         failures += await runVerification("HTTPRequest: rejects malformed requests", check: httpRejectsMalformedRequests)
@@ -70,6 +73,7 @@ struct PipelineCLI {
         failures += await runVerification("AddressGate: accepts loopback, RFC1918, link-local and ULA", check: addressGateAcceptsPrivateRanges)
         failures += await runVerification("AddressGate: refuses public and malformed addresses", check: addressGateRejectsPublicAddresses)
         failures += await runVerification("SharedFolders: issued IDs resolve and carry no path text", check: sharedFoldersResolveOnlyIssuedIDs)
+        failures += await runVerification("SharedFolders: photos are named by their path under the shared root", check: sharedFoldersNamePhotosByPathUnderTheRoot)
         failures += await runVerification("SharedFolders: unknown and traversal IDs never resolve", check: sharedFoldersRejectUnknownAndTraversalIDs)
         failures += await runVerification("SharedFolders: unshare invalidates every issued ID", check: sharedFoldersUnshareInvalidatesIDs)
         failures += await runVerification("PairingManager: a pairing code works exactly once", check: pairingCodeIsSingleUse)

@@ -689,9 +689,10 @@ async function loadPhotos() {
   renderList(folderCountText(), "This folder has no photos in it yet.");
   if (photos.length === 0) return;
   if (open) {
-    // Prefer the id, but fall back to the filename. The Mac re-mints every
-    // photo id whenever it re-shares the folder, so an id-only match would
-    // resolve to "gone" on every reload and slam the viewer shut each time an
+    // Prefer the id, but fall back to the name — the photo's path under the
+    // shared folder, which is unique inside it. The Mac re-mints every photo
+    // id whenever it re-shares the folder, so an id-only match would resolve
+    // to "gone" on every reload and slam the viewer shut each time an
     // unrelated file landed in the folder.
     let at = photos.findIndex((p) => p.id === open.id);
     if (at < 0) at = photos.findIndex((p) => p.name === open.name);
@@ -852,7 +853,11 @@ function closeViewer() {
 async function showPhoto() {
   const photo = photos[index];
   if (!photo) return closeViewer();
-  el("pv-name").textContent = photo.name;
+  // `name` is the photo's path under the shared folder, because that is what
+  // the reload re-anchor matches on and a filename alone is not unique with
+  // subfolders included. The header is one clipped line, so it shows the last
+  // component — a deep prefix would push the filename out of view.
+  el("pv-name").textContent = photo.name.split("/").pop();
   el("pv-count").textContent = (index + 1) + " of " + photos.length;
   paintBadges(photo);
   resetZoom();

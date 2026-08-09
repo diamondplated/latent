@@ -167,6 +167,40 @@ func sharedFoldersResolveOnlyIssuedIDs() async throws {
                 "photo ID leaks path information: \(first.id)")
 }
 
+func sharedFoldersNamePhotosByPathUnderTheRoot() async throws {
+    // With "Include Subfolders" on, two subfolders can each hold an
+    // IMG_1234.jpg. The client re-anchors the open photo by name when a
+    // `reload` lands — `share` re-mints every ID, so the id match never hits
+    // and the name is the only anchor there is. A bare `lastPathComponent`
+    // puts both files under one string, and the viewer re-anchors onto
+    // whichever came first while the swipe that follows marks it.
+    let root = URL(fileURLWithPath: "/Users/someone/Pictures/2024")
+    let inA = root.appendingPathComponent("A/IMG_1234.jpg")
+    let inB = root.appendingPathComponent("B/IMG_1234.jpg")
+    let atRoot = root.appendingPathComponent("IMG_9999.jpg")
+
+    let shared = SharedFolders()
+    let folderID = await shared.share(folder: root, photos: [inA, inB, atRoot])
+    let entries = await shared.photos(in: folderID)
+    let names = entries.map(\.name)
+
+    try require(names == ["A/IMG_1234.jpg", "B/IMG_1234.jpg", "IMG_9999.jpg"], "names = \(names)")
+    try require(Set(names).count == names.count, "names must be unique within a folder: \(names)")
+
+    // Re-sharing is the rescan the file watcher triggers: fresh IDs, same
+    // names. The name that survives has to still point at the same file.
+    _ = await shared.share(folder: root, photos: [inA, inB, atRoot])
+    let after = await shared.photos(in: folderID)
+    try require(after.map(\.name) == names, "names must be stable across a re-share: \(after.map(\.name))")
+    try require(Set(after.map(\.id)).isDisjoint(with: Set(entries.map(\.id))),
+                "a re-share must re-mint the IDs — this check is pointless otherwise")
+    guard let reAnchored = after.first(where: { $0.name == "B/IMG_1234.jpg" }) else {
+        throw VerifyError(message: "B/IMG_1234.jpg missing after re-share")
+    }
+    let resolved = await shared.photoURL(forID: reAnchored.id)
+    try require(resolved == inB, "re-anchoring by name resolved to \(String(describing: resolved)), wanted \(inB)")
+}
+
 func sharedFoldersRejectUnknownAndTraversalIDs() async throws {
     let root = URL(fileURLWithPath: "/Users/someone/Pictures/2024")
     let shared = SharedFolders()

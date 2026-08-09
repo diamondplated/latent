@@ -99,19 +99,16 @@ public struct HTTPRequest: Sendable, Equatable {
     }
 
     /// Absolute `buffer` index of the `\r\n\r\n` that ends the header block.
-    /// `[UInt8](buffer)` is always 0-based regardless of `buffer`'s own
-    /// indices (a `Data` slice does not reindex from zero), so the match
-    /// offset is converted back to `buffer`'s index space here — once, in
-    /// the one place that finds it — rather than leaving every caller to
-    /// remember the `+ buffer.startIndex` conversion itself.
+    ///
+    /// `firstRange(of:)` searches in `buffer`'s own index space, so a `Data`
+    /// slice whose `startIndex` is not zero reports an index callers can use
+    /// directly — no offset arithmetic to get wrong, which is what the earlier
+    /// hand-rolled scan did. It also stops copying: this runs on every receive
+    /// callback, and the previous version rebuilt the whole buffer as `[UInt8]`
+    /// and allocated a 4-byte `Array` per offset each time, so a peer dribbling
+    /// the 64 KB cap one byte at a time cost ~65k scans of ~65k allocations.
     private static func headerTerminator(in buffer: Data) -> Int? {
-        let pattern: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
-        let bytes = [UInt8](buffer)
-        guard bytes.count >= 4 else { return nil }
-        for i in 0...(bytes.count - 4) where Array(bytes[i..<(i + 4)]) == pattern {
-            return buffer.startIndex + i
-        }
-        return nil
+        buffer.firstRange(of: [0x0D, 0x0A, 0x0D, 0x0A])?.lowerBound
     }
 
     private static func parseQuery(_ s: String) -> [String: String] {

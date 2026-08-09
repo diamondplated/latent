@@ -86,10 +86,27 @@ public actor SharedFolders {
     }
 
     public func photos(in folderID: SharedFolderID) -> [PhotoEntry] {
-        (folderPhotoIDs[folderID] ?? []).compactMap { id in
+        let root = folderRoots[folderID]
+        return (folderPhotoIDs[folderID] ?? []).compactMap { id in
             guard let entry = entries[id] else { return nil }
-            return PhotoEntry(id: id, name: entry.url.lastPathComponent)
+            return PhotoEntry(id: id, name: Self.name(of: entry.url, under: root))
         }
+    }
+
+    /// The photo's path relative to the shared folder root — its filename for
+    /// a non-recursive folder, `Sub/Dir/name.jpg` for a recursive one.
+    ///
+    /// It has to be unique within the folder, because the client anchors the
+    /// open photo on it. `share` re-mints every photo ID on every rescan, so
+    /// the id match on a `reload` never hits and this name is the *only* thing
+    /// the viewer re-anchors by; with "Include Subfolders" on, a bare
+    /// `lastPathComponent` puts `A/IMG_1234.jpg` and `B/IMG_1234.jpg` under the
+    /// same string and the next swipe marks whichever one sorted first.
+    private static func name(of url: URL, under root: URL?) -> String {
+        guard let root else { return url.lastPathComponent }
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard url.path.hasPrefix(prefix) else { return url.lastPathComponent }
+        return String(url.path.dropFirst(prefix.count))
     }
 
     public func photoURL(forID id: String) -> URL? {

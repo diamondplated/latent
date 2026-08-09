@@ -44,10 +44,12 @@ files stay exactly where they are, and everything the app can do runs on your ow
 - ✨ **Five-stage enhancement**, all local — upscale, denoise, artifact removal, face restore,
   sharpen — with live A/B compare and non-destructive sidecars.
 - 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
-  your Mac.
+  your Mac — though nothing in the app starts an indexing pass yet, so there is nothing to query
+  ([status](#status-and-limits)).
 - 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
-- 🚫 **Zero runtime network calls by default.** Nothing touches the network unless you ask it to:
-  a setup script you run yourself, once, to fetch model weights — and the optional phone companion
+- 🚫 **Zero runtime network calls by default.** Three things reach the network, each because you
+  asked for it: a setup script you run yourself, once, to fetch model weights; the map view, which
+  is MapKit and fetches its tiles from Apple while it is open; and the optional phone companion
   below, which you switch on per session and which never leaves your LAN.
 
 ---
@@ -134,8 +136,9 @@ undo, and bulk select for batch operations.
 side-by-side, hold `B` to blink), and `.enhance.json` sidecars so your edits are non-destructive and
 diffable.
 
-**Searching.** Index a folder once, then query it by image similarity or by typed description.
-Embeddings are OpenCLIP ViT-B/32, 512-dimensional, persisted per folder and staleness-aware.
+**Searching.** Query a folder by image similarity or by typed description. Embeddings are OpenCLIP
+ViT-B/32, 512-dimensional, persisted per folder and staleness-aware. The indexing pass that fills
+that index has no trigger yet — see [Status and limits](#status-and-limits).
 
 ---
 
@@ -294,7 +297,10 @@ Latent is pre-1.0. It is a working app, not a shipped product:
 - The Quick Look extension target isn't built yet — `PhotoQuickLook.QuickLookRenderer` is written
   and ready for it.
 - Display is not yet Metal-backed, so HDR and wide-gamut rendering aren't what they could be.
-- Text search requires the converted OpenCLIP assets; image-to-image similarity does too.
+- Search cannot be used yet. `SearchEngine` indexes a folder and queries the index, and the phone
+  companion reads one when it finds it, but nothing in the app or the CLI calls `indexFolder`, so
+  no index gets built. Both text search and image-to-image similarity also need the converted
+  OpenCLIP assets.
 
 ---
 

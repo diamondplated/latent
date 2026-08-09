@@ -118,8 +118,20 @@ struct BrowserView: View {
         // Folder switch hooks.
         .onChange(of: state.folder) { _, newFolder in
             if let folder = newFolder {
-                if let loaded = try? VimKeymap.load(folder: folder) {
-                    state.vimKeymap = loaded
+                // A failed load must still replace the keymap. Keeping the
+                // previous folder's picks, labels and marks means the next
+                // pick re-saves them into *this* folder's state file, where
+                // `VimKeymap.relativePath` writes them as absolute paths into
+                // the old folder — corrupt, deterministic and session-long.
+                do {
+                    state.vimKeymap = try VimKeymap.load(folder: folder)
+                } catch {
+                    state.vimKeymap = VimKeymap()
+                    // Worth an alert: the picks and labels are simply gone for
+                    // this session, and a silent reset looks like the app lost
+                    // them. The raw error stays out of it — a decoding dump is
+                    // not something to put in front of someone.
+                    state.lastError = "Couldn't read the saved picks and labels for this folder, so it's starting fresh."
                 }
             }
             // Forget GPS cache for the previous folder. We'll lazy-rebuild
