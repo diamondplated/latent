@@ -1,1 +1,925 @@
-<!doctype html><title>Latent</title><p>placeholder
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Latent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Latent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d0d0f">
+<style>
+  :root {
+    --bg: #0d0d0f;
+    --fg: #ececf0;
+    --dim: #8b8d98;
+    --line: #26262b;
+    --pick: #46a758;
+    --reject: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  body.locked { overflow: hidden; }
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    background: rgba(13, 13, 15, 0.86);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 12px; color: var(--dim); }
+  header button {
+    all: unset;
+    display: block;
+    width: 100%;
+    cursor: pointer;
+  }
+
+  #status {
+    padding: 18vh 28px 0;
+    text-align: center;
+    color: var(--dim);
+    max-width: 30em;
+    margin: 0 auto;
+  }
+  #status[hidden] { display: none; }
+
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 2px;
+    padding: 2px 2px calc(env(safe-area-inset-bottom) + 2px);
+  }
+  .cell {
+    all: unset;
+    position: relative;
+    display: block;
+    aspect-ratio: 1;
+    background: #17171b;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .cell img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+  .cell img.ready { opacity: 1; }
+  .dot {
+    position: absolute;
+    left: 5px;
+    bottom: 5px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+  }
+  .mark {
+    position: absolute;
+    right: 4px;
+    top: 3px;
+    font-size: 14px;
+    font-weight: 700;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  }
+  .mark.pick { color: var(--pick); }
+  .mark.reject { color: var(--reject); }
+  [hidden] { display: none !important; }
+
+  #viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #preview {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    -webkit-touch-callout: none;
+    pointer-events: none;
+    will-change: transform;
+  }
+  #chrome {
+    position: absolute;
+    inset: calc(env(safe-area-inset-top) + 8px) 12px auto 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    pointer-events: none;
+  }
+  #chrome .meta { flex: 1; min-width: 0; }
+  #chrome .name {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-shadow: 0 1px 4px #000;
+  }
+  #chrome .count { font-size: 11px; color: var(--dim); text-shadow: 0 1px 4px #000; }
+  #close {
+    all: unset;
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 6px 12px;
+    font-size: 15px;
+    border-radius: 999px;
+    background: rgba(40, 40, 46, 0.8);
+  }
+  #badges {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(env(safe-area-inset-bottom) + 14px);
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    pointer-events: none;
+    font-size: 12px;
+  }
+  #badges span {
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(30, 30, 36, 0.85);
+  }
+  #badges .b-pick { color: var(--pick); }
+  #badges .b-reject { color: var(--reject); }
+  #badges .b-label::before {
+    content: "";
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: var(--swatch, transparent);
+  }
+
+  #labels {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: flex-end;
+  }
+  #labels .sheet {
+    width: 100%;
+    background: #1a1a1f;
+    border-radius: 16px 16px 0 0;
+    padding: 16px 16px calc(env(safe-area-inset-bottom) + 16px);
+  }
+  #labels h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+  #labels .row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+  }
+  #labels button {
+    all: unset;
+    cursor: pointer;
+    text-align: center;
+    padding: 10px 0;
+    border-radius: 10px;
+    background: #26262b;
+    font-size: 12px;
+  }
+  #labels button .swatch {
+    display: block;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    margin: 0 auto 6px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+  }
+
+  #toast {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(env(safe-area-inset-bottom) + 24px);
+    z-index: 30;
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: #2c2c33;
+    font-size: 13px;
+    max-width: 88vw;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<header id="head" hidden>
+  <button id="refresh" type="button">
+    <h1 id="folder-name"></h1>
+    <p id="folder-count"></p>
+  </button>
+</header>
+
+<div id="status">Starting…</div>
+<div id="grid"></div>
+
+<div id="viewer" hidden>
+  <img id="preview" alt="">
+  <div id="chrome">
+    <div class="meta">
+      <div class="name" id="pv-name"></div>
+      <div class="count" id="pv-count"></div>
+    </div>
+    <button id="close" type="button">Done</button>
+  </div>
+  <div id="badges"></div>
+</div>
+
+<div id="labels" hidden>
+  <div class="sheet">
+    <h2>Colour label</h2>
+    <div class="row" id="label-row"></div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script>
+"use strict";
+
+// Swipe tuning. These are feel, not logic — what reads as a deliberate swipe
+// in a simulator reads as a twitch in a hand, and a thumb on a phone travels
+// differently from a finger on an iPad. Expect to adjust these against a real
+// device rather than reasoning about them.
+const SWIPE_MIN_DISTANCE = 60;    // px before a drag counts as a swipe
+const SWIPE_MAX_DURATION = 600;   // ms; slower than this is a drag, not a swipe
+const SWIPE_AXIS_RATIO   = 1.6;   // how much one axis must beat the other
+const LONG_PRESS_MS      = 450;   // hold before the label picker appears
+
+// Movement that still counts as a hold rather than a drag, and the window a
+// second tap has to land in to read as a double tap.
+const LONG_PRESS_SLOP_PX = 12;
+const DOUBLE_TAP_MS      = 300;
+const MAX_ZOOM           = 6;
+const DOUBLE_TAP_ZOOM    = 2.5;
+
+// Lightroom's colours, matching BrowserView.colorForLabel on the Mac so the
+// same photo wears the same dot on both screens. 6-9 are grey there too.
+const LABEL_COLORS = [
+  "", "#e5484d", "#e2b93b", "#46a758", "#3e7bfa",
+  "#8e4ec6", "#8b8d98", "#8b8d98", "#8b8d98", "#8b8d98"
+];
+
+const TOKEN_KEY = "latent.deviceToken";
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+let authToken = localStorage.getItem(TOKEN_KEY);
+let folderID = null;
+let photos = [];
+let index = 0;
+let viewerOpen = false;
+
+const el = (id) => document.getElementById(id);
+const statusEl = el("status");
+const gridEl = el("grid");
+const headEl = el("head");
+const viewerEl = el("viewer");
+const previewEl = el("preview");
+const labelsEl = el("labels");
+const toastEl = el("toast");
+
+// ---------------------------------------------------------------------------
+// Swipe resolution
+// ---------------------------------------------------------------------------
+
+/// Turn a finished drag into an action name, or null when it was not a swipe.
+///
+/// Diagonals: this biases toward the horizontal. A wrong navigation costs one
+/// swipe back; a wrong pick or reject writes to the sidecar the Mac shares, and
+/// the person culling is looking at the photo, not at their thumb. So the
+/// vertical (destructive) reading has to win outright — the vertical travel must
+/// beat the horizontal by SWIPE_AXIS_RATIO — while the horizontal reading only
+/// has to clear the distance floor. 100px up and 90px left navigates; 100px up
+/// and 30px left picks. Raise SWIPE_AXIS_RATIO to make picks harder to trigger
+/// by accident, lower it toward 1.0 for plain dominant-axis behaviour.
+function resolveSwipe(dx, dy, dt) {
+  if (dt > SWIPE_MAX_DURATION) return null;
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  if (ay >= SWIPE_MIN_DISTANCE && ay >= ax * SWIPE_AXIS_RATIO) {
+    return dy < 0 ? "pick" : "reject";
+  }
+  if (ax >= SWIPE_MIN_DISTANCE) {
+    return dx < 0 ? "next" : "prev";
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------
+
+/// Every authenticated call goes through here. The token lives in the header
+/// and nowhere else — never in a URL, never in a log line.
+async function api(path, options) {
+  const opts = Object.assign({}, options);
+  opts.headers = Object.assign({}, opts.headers, { "Authorization": "Bearer " + authToken });
+  const res = await fetch(path, opts);
+  if (res.status === 401) {
+    expirePairing();
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res;
+}
+
+function expirePairing() {
+  authToken = null;
+  localStorage.removeItem(TOKEN_KEY);
+  closeViewer();
+  photos = [];
+  gridEl.replaceChildren();
+  headEl.hidden = true;
+  showStatus("Pairing expired. Scan the QR on your Mac again.");
+}
+
+function shortDeviceName() {
+  const ua = navigator.userAgent;
+  if (ua.indexOf("iPad") !== -1) return "iPad";
+  if (ua.indexOf("iPhone") !== -1) return "iPhone";
+  if (ua.indexOf("Android") !== -1) return "Android phone";
+  if (ua.indexOf("Macintosh") !== -1) return "Mac";
+  return "Phone";
+}
+
+async function pair(code) {
+  let res;
+  try {
+    res = await fetch("/api/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code, deviceName: shortDeviceName() })
+    });
+  } catch (e) {
+    showStatus("Could not reach your Mac. Check that it is awake and on the same wifi, then scan again.");
+    return false;
+  }
+  if (res.status === 403) {
+    showStatus("Pairing was declined on the Mac.");
+    return false;
+  }
+  if (res.status === 429) {
+    showStatus("Too many pairing attempts. Wait a minute, then scan a fresh QR code.");
+    return false;
+  }
+  if (!res.ok) {
+    showStatus("That pairing code is no longer valid. Scan a fresh QR code on your Mac.");
+    return false;
+  }
+  const data = await res.json();
+  if (!data || typeof data.token !== "string") {
+    showStatus("Pairing failed. Scan the QR on your Mac again.");
+    return false;
+  }
+  authToken = data.token;
+  localStorage.setItem(TOKEN_KEY, authToken);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Images
+//
+// `<img src="/api/thumb/{id}">` cannot carry an Authorization header, and every
+// route but /api/pair needs one — a bare src would 401 on every tile. So the
+// bytes are fetched and handed to the tag as an object URL, and the laziness
+// that `loading="lazy"` would have given comes from an IntersectionObserver
+// instead: nothing is requested until the tile is near the viewport. The
+// alternative — the token in the query string — is not on the table.
+// ---------------------------------------------------------------------------
+
+const thumbCache = new Map();      // photo id -> Promise<objectURL | null>
+const previewCache = new Map();    // photo id -> Promise<objectURL | null>
+const PREVIEW_CACHE_MAX = 6;       // ~6 downscaled JPEGs held at once
+
+function fetchImage(cache, path, id) {
+  const hit = cache.get(id);
+  if (hit) return hit;
+  const p = api(path + encodeURIComponent(id))
+    .then((r) => r.blob())
+    .then((b) => URL.createObjectURL(b))
+    .catch(() => { cache.delete(id); return null; });
+  cache.set(id, p);
+  return p;
+}
+
+function thumbURL(id) {
+  return fetchImage(thumbCache, "/api/thumb/", id);
+}
+
+function previewURL(id) {
+  const p = fetchImage(previewCache, "/api/preview/", id);
+  // Map iteration is insertion-ordered, so the first key is the oldest.
+  while (previewCache.size > PREVIEW_CACHE_MAX) {
+    const oldest = previewCache.keys().next().value;
+    const stale = previewCache.get(oldest);
+    previewCache.delete(oldest);
+    Promise.resolve(stale).then((u) => { if (u) URL.revokeObjectURL(u); });
+  }
+  return p;
+}
+
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const img = entry.target;
+    thumbObserver.unobserve(img);
+    thumbURL(img.dataset.photoId).then((url) => {
+      if (!url) return;
+      img.src = url;
+      img.classList.add("ready");
+    });
+  }
+}, { rootMargin: "500px 0px" });
+
+function dropImageCaches() {
+  for (const cache of [thumbCache, previewCache]) {
+    for (const p of cache.values()) {
+      Promise.resolve(p).then((u) => { if (u) URL.revokeObjectURL(u); });
+    }
+    cache.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Grid
+// ---------------------------------------------------------------------------
+
+function showStatus(text) {
+  statusEl.textContent = text;   // server strings are text, never markup
+  statusEl.hidden = false;
+}
+
+function hideStatus() {
+  statusEl.hidden = true;
+}
+
+let toastTimer = null;
+function toast(text) {
+  toastEl.textContent = text;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 2600);
+}
+
+function renderGrid() {
+  // The observer holds its targets, and replaceChildren only detaches them —
+  // a detached tile never intersects, so without this a reloaded folder leaks
+  // one dead observation per photo.
+  thumbObserver.disconnect();
+  gridEl.replaceChildren();
+  const frag = document.createDocumentFragment();
+  photos.forEach((photo, i) => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "cell";
+
+    const img = document.createElement("img");
+    img.alt = photo.name;              // property assignment: never parsed as HTML
+    img.dataset.photoId = photo.id;
+    img.decoding = "async";
+
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    const mark = document.createElement("span");
+    mark.className = "mark";
+
+    cell.append(img, dot, mark);
+    cell.addEventListener("click", () => openViewer(i));
+
+    photo.dot = dot;
+    photo.mark = mark;
+    paintPhoto(photo);
+    thumbObserver.observe(img);
+    frag.appendChild(cell);
+  });
+  gridEl.appendChild(frag);
+}
+
+function paintPhoto(photo) {
+  if (photo.dot) {
+    const color = LABEL_COLORS[photo.label] || "";
+    photo.dot.hidden = !color;
+    photo.dot.style.background = color;
+  }
+  if (photo.mark) {
+    const glyph = photo.picked && photo.rejected ? "✓✕" : photo.picked ? "✓" : photo.rejected ? "✕" : "";
+    photo.mark.textContent = glyph;
+    photo.mark.hidden = glyph === "";
+    photo.mark.className = "mark " + (photo.picked ? "pick" : "reject");
+  }
+  if (viewerOpen && photos[index] === photo) paintBadges(photo);
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+async function loadFolder() {
+  showStatus("Loading…");
+  let data;
+  try {
+    data = await (await api("/api/folders")).json();
+  } catch (e) {
+    if (authToken) showStatus("Could not reach your Mac. Check that it is awake and on the same wifi.");
+    return;
+  }
+  const folders = (data && data.folders) || [];
+  if (folders.length === 0) {
+    headEl.hidden = true;
+    showStatus("No folder is shared yet. Open a folder on your Mac and the photos will appear here.");
+    return;
+  }
+  // ponytail: the Mac shares exactly one folder at a time — the one on screen
+  // (PhoneAccessController.syncSharedFolder unshares the rest) — so take the
+  // first rather than building a folder chooser nothing can reach.
+  const folder = folders[0];
+  folderID = folder.id;
+  el("folder-name").textContent = folder.name;
+  headEl.hidden = false;
+  await loadPhotos();
+}
+
+async function loadPhotos() {
+  let data;
+  try {
+    data = await (await api("/api/folder/" + encodeURIComponent(folderID))).json();
+  } catch (e) {
+    if (authToken) showStatus("Could not load that folder. Pull the Mac awake and tap the folder name to retry.");
+    return;
+  }
+  dropImageCaches();
+  photos = ((data && data.photos) || []).map((p) => ({
+    id: String(p.id),
+    name: String(p.name),
+    picked: !!p.picked,
+    rejected: !!p.rejected,
+    label: Number(p.label) || 0
+  }));
+  el("folder-count").textContent = photos.length === 1 ? "1 photo" : photos.length + " photos";
+  if (photos.length === 0) {
+    gridEl.replaceChildren();
+    showStatus("This folder has no photos in it yet.");
+    return;
+  }
+  hideStatus();
+  renderGrid();
+}
+
+// ---------------------------------------------------------------------------
+// Actions — optimistic, then reconciled against what the Mac says
+// ---------------------------------------------------------------------------
+
+function applyLocally(photo, action) {
+  // Mirrors VimKeymap: picks and rejects are independent toggles, label 0
+  // clears. A swipe that waited on the network would feel broken, so the
+  // screen changes first and the request follows.
+  if (action === "pick") photo.picked = !photo.picked;
+  else if (action === "reject") photo.rejected = !photo.rejected;
+  else if (action.indexOf("label") === 0) photo.label = Number(action.slice(5)) || 0;
+}
+
+async function sendAction(photo, action) {
+  const before = { picked: photo.picked, rejected: photo.rejected, label: photo.label };
+  applyLocally(photo, action);
+  paintPhoto(photo);
+  try {
+    await api("/api/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ photoID: photo.id, action: action })
+    });
+  } catch (e) {
+    // The Mac is the one writer. If it did not take the change, neither do we.
+    photo.picked = before.picked;
+    photo.rejected = before.rejected;
+    photo.label = before.label;
+    paintPhoto(photo);
+    if (authToken) toast("The Mac did not accept that.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Viewer
+// ---------------------------------------------------------------------------
+
+let previewEpoch = 0;
+
+function openViewer(i) {
+  index = i;
+  viewerOpen = true;
+  viewerEl.hidden = false;
+  document.body.classList.add("locked");
+  showPhoto();
+}
+
+function closeViewer() {
+  viewerOpen = false;
+  viewerEl.hidden = true;
+  labelsEl.hidden = true;
+  document.body.classList.remove("locked");
+  resetZoom();
+}
+
+async function showPhoto() {
+  const photo = photos[index];
+  if (!photo) return closeViewer();
+  el("pv-name").textContent = photo.name;
+  el("pv-count").textContent = (index + 1) + " of " + photos.length;
+  paintBadges(photo);
+  resetZoom();
+
+  const epoch = ++previewEpoch;
+  // The thumbnail is already decoded, so show it while the preview lands.
+  const thumb = await thumbURL(photo.id);
+  if (epoch === previewEpoch && thumb) previewEl.src = thumb;
+  const full = await previewURL(photo.id);
+  if (epoch !== previewEpoch) return;
+  if (full) previewEl.src = full;
+  else if (!thumb) toast("That photo could not be loaded.");
+
+  const next = photos[index + 1];
+  if (next) previewURL(next.id);   // the swipe after this one is already paid for
+}
+
+function paintBadges(photo) {
+  const badges = el("badges");
+  badges.replaceChildren();
+  if (photo.picked) {
+    const b = document.createElement("span");
+    b.className = "b-pick";
+    b.textContent = "Picked";
+    badges.appendChild(b);
+  }
+  if (photo.rejected) {
+    const b = document.createElement("span");
+    b.className = "b-reject";
+    b.textContent = "Rejected";
+    badges.appendChild(b);
+  }
+  if (photo.label > 0) {
+    const b = document.createElement("span");
+    b.className = "b-label";
+    b.style.setProperty("--swatch", LABEL_COLORS[photo.label] || "#8b8d98");
+    b.textContent = "Label " + photo.label;
+    badges.appendChild(b);
+  }
+}
+
+function step(delta) {
+  const target = index + delta;
+  if (target < 0 || target >= photos.length) return;
+  const from = photos[index];
+  index = target;
+  showPhoto();
+  // Posted with the photo we were on: the Mac selects it, then moves, which
+  // leaves both screens on the same picture.
+  sendAction(from, delta > 0 ? "next" : "prev");
+}
+
+// ---------------------------------------------------------------------------
+// Zoom and pan
+// ---------------------------------------------------------------------------
+
+let scale = 1;
+let tx = 0;
+let ty = 0;
+
+function applyTransform() {
+  previewEl.style.transform = "translate(" + tx + "px, " + ty + "px) scale(" + scale + ")";
+}
+
+function resetZoom() {
+  scale = 1;
+  tx = 0;
+  ty = 0;
+  applyTransform();
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function touchDistance(a, b) {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+// ---------------------------------------------------------------------------
+// Gestures
+// ---------------------------------------------------------------------------
+
+let drag = null;        // single-finger drag in progress
+let pinch = null;       // two-finger pinch in progress
+let longPressTimer = null;
+let lastTapAt = 0;
+
+function cancelLongPress() {
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+}
+
+viewerEl.addEventListener("touchstart", (e) => {
+  if (!labelsEl.hidden) return;
+  if (e.touches.length >= 2) {
+    cancelLongPress();
+    drag = null;
+    const [a, b] = [e.touches[0], e.touches[1]];
+    pinch = {
+      baseDistance: Math.max(touchDistance(a, b), 1),
+      baseScale: scale,
+      baseX: tx,
+      baseY: ty,
+      midX: (a.clientX + b.clientX) / 2,
+      midY: (a.clientY + b.clientY) / 2
+    };
+    return;
+  }
+  if (pinch) return;
+  const t = e.touches[0];
+  drag = { x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY, t0: Date.now(), baseX: tx, baseY: ty };
+  if (scale === 1) {
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      drag = null;              // the hold consumed this touch; it is not a swipe
+      openLabelPicker();
+    }, LONG_PRESS_MS);
+  }
+}, { passive: true });
+
+viewerEl.addEventListener("touchmove", (e) => {
+  if (pinch && e.touches.length >= 2) {
+    const [a, b] = [e.touches[0], e.touches[1]];
+    const distance = Math.max(touchDistance(a, b), 1);
+    scale = clamp(pinch.baseScale * (distance / pinch.baseDistance), 1, MAX_ZOOM);
+    const midX = (a.clientX + b.clientX) / 2;
+    const midY = (a.clientY + b.clientY) / 2;
+    tx = pinch.baseX + (midX - pinch.midX);
+    ty = pinch.baseY + (midY - pinch.midY);
+    applyTransform();
+    return;
+  }
+  if (!drag) return;
+  const t = e.touches[0];
+  drag.x = t.clientX;
+  drag.y = t.clientY;
+  const moved = Math.hypot(drag.x - drag.x0, drag.y - drag.y0);
+  if (moved > LONG_PRESS_SLOP_PX) cancelLongPress();
+  if (scale > 1) {
+    // Zoomed in, one finger pans instead of swiping — you are reading detail,
+    // not culling.
+    tx = drag.baseX + (drag.x - drag.x0);
+    ty = drag.baseY + (drag.y - drag.y0);
+    applyTransform();
+  }
+}, { passive: true });
+
+viewerEl.addEventListener("touchend", (e) => {
+  cancelLongPress();
+
+  if (pinch) {
+    if (e.touches.length >= 2) return;
+    pinch = null;
+    drag = null;
+    if (scale <= 1.05) resetZoom();
+    return;
+  }
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  if (e.touches.length > 0) return;
+
+  const dx = d.x - d.x0;
+  const dy = d.y - d.y0;
+  const dt = Date.now() - d.t0;
+
+  if (scale > 1) return;   // that was a pan
+
+  const moved = Math.hypot(dx, dy);
+  if (moved <= LONG_PRESS_SLOP_PX && dt < DOUBLE_TAP_MS) {
+    const now = Date.now();
+    if (now - lastTapAt < DOUBLE_TAP_MS) {
+      lastTapAt = 0;
+      scale = DOUBLE_TAP_ZOOM;
+      applyTransform();
+    } else {
+      lastTapAt = now;
+    }
+    return;
+  }
+
+  const action = resolveSwipe(dx, dy, dt);
+  if (!action) return;
+  if (action === "next") step(1);
+  else if (action === "prev") step(-1);
+  else sendAction(photos[index], action);
+}, { passive: true });
+
+viewerEl.addEventListener("touchcancel", () => {
+  cancelLongPress();
+  drag = null;
+  pinch = null;
+}, { passive: true });
+
+// ---------------------------------------------------------------------------
+// Label picker
+// ---------------------------------------------------------------------------
+
+function buildLabelPicker() {
+  const row = el("label-row");
+  row.replaceChildren();
+  for (let n = 0; n <= 9; n++) {
+    const b = document.createElement("button");
+    b.type = "button";
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = n === 0 ? "transparent" : LABEL_COLORS[n];
+    const caption = document.createElement("span");
+    caption.textContent = n === 0 ? "None" : String(n);
+    b.append(swatch, caption);
+    b.addEventListener("click", () => {
+      labelsEl.hidden = true;
+      const photo = photos[index];
+      if (photo) sendAction(photo, "label" + n);
+    });
+    row.appendChild(b);
+  }
+}
+
+function openLabelPicker() {
+  if (!viewerOpen || !photos[index]) return;
+  labelsEl.hidden = false;
+}
+
+labelsEl.addEventListener("click", (e) => {
+  if (e.target === labelsEl) labelsEl.hidden = true;
+});
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+el("close").addEventListener("click", closeViewer);
+el("refresh").addEventListener("click", () => { if (authToken) loadFolder(); });
+
+// A hardware keyboard on an iPad is free once the actions exist.
+document.addEventListener("keydown", (e) => {
+  if (!viewerOpen) return;
+  if (e.key === "Escape") closeViewer();
+  else if (e.key === "ArrowRight" || e.key === "j") step(1);
+  else if (e.key === "ArrowLeft" || e.key === "k") step(-1);
+});
+
+async function boot() {
+  buildLabelPicker();
+  const code = new URLSearchParams(location.search).get("c");
+  if (code) {
+    // Strip it before anything else can happen: a pairing code in the address
+    // bar is a pairing code in the history, the share sheet and the next
+    // screenshot. It is single-use, but it is single-use for 60 seconds.
+    history.replaceState(null, "", location.pathname);
+    showStatus("Pairing with your Mac…");
+    if (!(await pair(code))) return;
+  }
+  if (!authToken) {
+    showStatus("Not paired yet. Open the phone access sheet on your Mac and scan the QR code.");
+    return;
+  }
+  await loadFolder();
+}
+
+boot();
+</script>
+</body>
+</html>
