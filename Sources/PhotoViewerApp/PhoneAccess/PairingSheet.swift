@@ -68,8 +68,12 @@ struct PairingSheet: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(PairingManager.codeLifetime - 15))
                 // `pairingURL == nil` means the sheet is closing and the code
-                // has been cleared — do not mint a fresh one behind it.
-                guard !Task.isCancelled, ui.isEnabled, ui.pairingURL != nil else { return }
+                // has been cleared — do not mint a fresh one behind it. Skip
+                // the tick rather than leaving the loop: a sheet sitting on
+                // the off state, or one Turn off / Turn on cycle, must not
+                // kill rotation for the rest of the sheet's life. Cancellation
+                // still exits, via the `while`.
+                guard !Task.isCancelled, ui.isEnabled, ui.pairingURL != nil else { continue }
                 turnOn()
             }
         }

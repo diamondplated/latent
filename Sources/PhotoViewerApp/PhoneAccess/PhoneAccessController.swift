@@ -259,7 +259,15 @@ actor PhoneAccessController: ServeDelegate {
             // mutation would still land — writing a foreign absolute path into
             // the *current* folder's sidecar, which rehydrates as garbage on
             // the next load. This layer owns that contract, so it checks.
-            guard state.imageURLs.contains(url) else { return }
+            //
+            // The folder check is the load-bearing one, because it is the same
+            // question `VimKeymap.save` asks when it relativises the path.
+            // `imageURLs` alone is not enough: `loadFolder` sets `folder` to
+            // the new folder and only commits `imageURLs` after the walk, so
+            // mid-scan the list still belongs to the folder the user left.
+            guard let folder = state.folder else { return }
+            let root = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
+            guard url.path.hasPrefix(root), state.imageURLs.contains(url) else { return }
             // Select the photo the phone is looking at, then dispatch. Mutating
             // actions in VimKeymap operate on the current selection, so the
             // selection move is part of applying the action, not a side effect.
