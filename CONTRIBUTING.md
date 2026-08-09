@@ -46,7 +46,7 @@ and the trash flow all behave differently at a few thousand images than they do 
 
 - `PipelineCore` — `Stage` protocol, the chain executor, `IntermediateCache`, sidecar round-trip,
   `ImageBuffer`. Pure and cheap to test; this is where logic wants to live.
-- `EnhancementStages` — the five stages, each model-aware with a documented fallback.
+- `EnhancementStages` — the four stages, each model-aware with a documented fallback.
 - `PhotoIO` — reader/writer, EXIF round-trip, orientation baked into pixels before the pipeline sees
   them, colour-space awareness.
 - `PhotoML` — tiling with feathered seams, CoreML wrappers, model registry with negative caching,

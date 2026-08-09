@@ -140,7 +140,7 @@ Embeddings are OpenCLIP ViT-B/32, 512-dimensional, persisted per folder and stal
 
 ## The enhancement pipeline
 
-Five stages, each independently toggleable, each degrading gracefully when its model isn't
+Four stages, each independently toggleable, each degrading gracefully when its model isn't
 installed:
 
 | Stage | Model | Without the model |
@@ -190,7 +190,7 @@ tiling, search primitives, vim state, GPS extraction, Quick Look, and archive ex
 latent/
 ├── Sources/
 │   ├── PipelineCore/          Stage protocol, chain executor, cache, sidecar, ImageBuffer
-│   ├── EnhancementStages/     the five stages
+│   ├── EnhancementStages/     the four stages
 │   ├── PhotoIO/               reader/writer, EXIF round-trip, colour-space handling
 │   ├── PhotoML/               tiling, CoreML wrappers, model registry, face detect/composite
 │   ├── PhotoSearch/           embeddings, per-folder index, CLIP encoders, BPE tokenizer
