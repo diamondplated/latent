@@ -1,13 +1,19 @@
 # Conversion-only dependencies. None of this ships in the app — Latent itself
 # is pure Swift and loads the converted .mlpackage files.
 #
-# torch >= 2.6.0 is a security floor, not a preference. CVE-2025-32434 is a
-# bypass of `torch.load(weights_only=True)`, which is exactly what every
-# conversion script does to a .pth downloaded off the internet. 2.7.1 is the
-# newest version coremltools 9 is close to being tested against (it names
-# 2.7.0), so it clears the critical advisory without wandering far from
-# supported ground.
-torch==2.7.1
+# torch is a security floor, not a preference. CVE-2025-32434 is a bypass of
+# `torch.load(weights_only=True)` — exactly what every conversion script does
+# to a .pth downloaded off the internet — and several further advisories land
+# between 2.6 and 2.13. 2.13.0 clears all of them.
+#
+# coremltools 9.0 prints "Torch version 2.13.0 has not been tested"; its table
+# stops at 2.7.0. That warning is about coverage, not a known failure, and the
+# conversion was verified against it directly: Real-ESRGAN x2plus converts and
+# its CoreML output matches the PyTorch reference to within fp16 tolerance
+# (max abs diff 0.00114). Measured beats tabulated — but if a future model
+# trips on it, 2.7.1 is the fallback that is inside coremltools' tested range
+# and still clears the critical advisory.
+torch==2.13.0
 coremltools==9.0
 open_clip_torch==2.24.0
 numpy<2.0

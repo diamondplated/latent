@@ -11,9 +11,9 @@ Usage:
     pip install -r scripts/requirements.txt
     python3 scripts/convert_realesrgan.py
 
-Verified with Python 3.12, torch 2.7.1, coremltools 9.0 — converted end to
+Verified with Python 3.12, torch 2.13.0, coremltools 9.0 — converted end to
 end and the CoreML output matched the PyTorch reference to within fp16
-tolerance (max abs diff 0.0015).
+tolerance (max abs diff 0.0011).
 
 The RRDBNet architecture is vendored in scripts/archs/ rather than imported
 from basicsr; see that file for why.
