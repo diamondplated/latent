@@ -23,6 +23,7 @@
   <a href="#what-it-does">Features</a> ·
   <a href="#the-enhancement-pipeline">Pipeline</a> ·
   <a href="THIRD_PARTY_MODELS.md">Models &amp; licensing</a> ·
+  <a href="SECURITY.md">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
