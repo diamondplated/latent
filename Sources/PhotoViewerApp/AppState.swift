@@ -573,7 +573,22 @@ final class AppState {
         case .last:  selectLast()
         case .jumpToMark(let c):
             if let url = vimKeymap.marks[c] { select(url: url) }
-        case .setMark, .setColorLabel, .togglePick, .toggleReject:
+        case .setColorLabel, .togglePick, .toggleReject:
+            if let folder { vimKeymap.saveInBackground(folder: folder) }
+            // Both writers land here — the keyboard via BrowserView, the phone
+            // via PhoneAccessController.apply — and both have already mutated
+            // the keymap and put the affected photo under `currentURL` by the
+            // time dispatch runs. So this is the one place that knows a photo's
+            // state changed, whoever changed it, which is why the phone is told
+            // from here rather than from either caller.
+            if let url = currentURL {
+                let picked = vimKeymap.isPicked(url)
+                let rejected = vimKeymap.isRejected(url)
+                let label = vimKeymap.colorLabel(for: url)
+                Task { await phoneAccess.publish(url: url, picked: picked, rejected: rejected, label: label) }
+            }
+        case .setMark:
+            // Marks are Mac-only navigation; the phone has no concept of them.
             if let folder { vimKeymap.saveInBackground(folder: folder) }
         case .none:
             break

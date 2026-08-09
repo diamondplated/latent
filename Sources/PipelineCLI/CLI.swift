@@ -85,6 +85,8 @@ struct PipelineCLI {
         failures += await runVerification("Router: an approved pairing issues a working token", check: routerPairingIssuesTokenWhenApproved)
         failures += await runVerification("Router: swipe actions map onto VimActions", check: routerMapsSwipeActionsToVimActions)
         failures += await runVerification("Router: unknown action names are rejected", check: routerRejectsUnknownActionNames)
+        failures += await runVerification("SSE: frames carry event and data lines and end blank", check: sseFramesAreWellFormed)
+        failures += await runVerification("SSE: multi-line payloads split across data lines", check: sseFramesEscapeNewlinesInData)
         failures += await runVerification("HTTPRequest: parses correctly from a non-zero-startIndex Data slice", check: httpParsesFromNonZeroStartIndexSlice)
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
         failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)

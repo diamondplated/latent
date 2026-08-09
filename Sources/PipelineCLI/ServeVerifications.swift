@@ -415,6 +415,22 @@ func routerMapsSwipeActionsToVimActions() async throws {
     try require(recorded[0].1 == .pick, "wrong action: \(recorded[0].1)")
 }
 
+func sseFramesAreWellFormed() async throws {
+    let frame = String(decoding: SSEFrame.encode(event: "photo", data: #"{"id":"P1","picked":true}"#), as: UTF8.self)
+    try require(frame.hasPrefix("event: photo\n"), "missing event line: \(frame.debugDescription)")
+    try require(frame.contains("data: {\"id\":\"P1\",\"picked\":true}\n"), "missing data line")
+    try require(frame.hasSuffix("\n\n"), "an SSE frame must end with a blank line")
+}
+
+func sseFramesEscapeNewlinesInData() async throws {
+    let frame = String(decoding: SSEFrame.encode(event: "note", data: "line one\nline two"), as: UTF8.self)
+    // A raw newline inside data would terminate the frame early; each line
+    // must carry its own `data:` prefix.
+    try require(frame.contains("data: line one\ndata: line two\n"),
+                "multi-line payload not split across data lines: \(frame.debugDescription)")
+    try require(frame.hasSuffix("\n\n"), "frame must still end with a blank line")
+}
+
 func routerRejectsUnknownActionNames() async throws {
     let pairing = PairingManager()
     let delegate = StubServeDelegate()

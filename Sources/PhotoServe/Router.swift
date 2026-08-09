@@ -43,6 +43,26 @@ public protocol ServeDelegate: Actor {
     func search(folderID: String, query: String) async -> [String]?
 }
 
+/// Server-sent events. One-way, which is all the phone needs, and plain HTTP
+/// — no handshake, no framing protocol, no upgrade dance. A WebSocket here
+/// would be roughly ten times the code for a channel that only ever flows
+/// one direction.
+public enum SSEFrame {
+    /// The content type that tells `LocalServer` this response outlives its
+    /// request. Named here because the router produces it and the server
+    /// keys on it, and a typo in either would silently close the stream.
+    public static let contentType = "text/event-stream"
+
+    public static func encode(event: String, data: String) -> Data {
+        var out = "event: \(event)\n"
+        for line in data.split(separator: "\n", omittingEmptySubsequences: false) {
+            out += "data: \(line)\n"
+        }
+        out += "\n"
+        return Data(out.utf8)
+    }
+}
+
 public actor Router {
     private let pairing: PairingManager
     private let delegate: any ServeDelegate
@@ -65,7 +85,16 @@ public actor Router {
         }
 
         // Lock two: every remaining route needs a device token.
-        guard let token = req.bearerToken, await pairing.isValidToken(token) else {
+        //
+        // `EventSource` is the browser's only way to read a stream without
+        // hand-rolling one, and it cannot set an `Authorization` header. So
+        // `/api/events` — and nothing else — also accepts the token as a query
+        // parameter. The header is still preferred when both are present, and
+        // the address gate above still applies: the query form widens where the
+        // secret may sit, never who may present it. Nothing in this module logs
+        // a request line, so it is not written anywhere either.
+        let presented = req.bearerToken ?? (req.path == "/api/events" ? req.query["t"] : nil)
+        guard let token = presented, await pairing.isValidToken(token) else {
             return .status(401)
         }
 
@@ -116,6 +145,20 @@ public actor Router {
             guard let q = req.query["q"], !q.isEmpty else { return .status(400) }
             guard let ids = await delegate.search(folderID: folderID, query: q) else { return .status(404) }
             return .json(["photoIDs": ids])
+
+        case ("GET", "events", nil):
+            // The head plus one frame. `LocalServer` recognises the content
+            // type, sends this, and then keeps the connection — every later
+            // frame arrives through `LocalServer.broadcast`.
+            return HTTPResponse(
+                status: 200,
+                headers: [
+                    "Content-Type": SSEFrame.contentType,
+                    "Cache-Control": "no-store",
+                    "Connection": "keep-alive",
+                ],
+                body: SSEFrame.encode(event: "hello", data: "{}")
+            )
 
         default:
             return .status(404)

@@ -19,6 +19,11 @@ public actor LocalServer {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var readDeadlines: [ObjectIdentifier: Task<Void, Never>] = [:]
+    /// Which of `connections` are serving an event stream. Deliberately a set
+    /// of keys into `connections` rather than a second dictionary: one store
+    /// owns the connections, so `stop()` and `close(_:)` cannot cancel a
+    /// stream in one place and leave it live in the other.
+    private var sseStreams: Set<ObjectIdentifier> = []
     private var router: Router?
 
     public init() {}
@@ -77,9 +82,23 @@ public actor LocalServer {
         listener = nil
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
+        // Every stream is a key into `connections`, so the loop above already
+        // cancelled it. Clearing the set is what stops a later `broadcast`
+        // from pushing state to a phone after access was switched off.
+        sseStreams.removeAll()
         for (_, t) in readDeadlines { t.cancel() }
         readDeadlines.removeAll()
         router = nil
+    }
+
+    /// Push a frame to every live event stream. A connection whose send fails
+    /// — a phone that walked out of wifi range — is dropped rather than kept
+    /// and retried; the browser's `EventSource` reconnects on its own.
+    public func broadcast(_ frame: Data) {
+        for key in sseStreams {
+            guard let connection = connections[key] else { continue }
+            sendFrame(frame, on: connection)
+        }
     }
 
     private func accept(_ connection: NWConnection) {
@@ -148,14 +167,48 @@ public actor LocalServer {
     }
 
     private func send(_ response: HTTPResponse, on connection: NWConnection) {
+        // An event stream is the one response that outlives its request: the
+        // head and first frame go out now, the rest arrive via `broadcast`,
+        // and the connection is not closed until the peer goes away or phone
+        // access is switched off. The read deadline was already cleared before
+        // the router ran, so nothing reaps it — and that hole stays shut,
+        // because the deadline only clears once a complete request has been
+        // parsed. A peer that connects and says nothing still never gets here.
+        if response.headers["Content-Type"] == SSEFrame.contentType {
+            sseStreams.insert(ObjectIdentifier(connection))
+            watchForPeerClose(on: connection)
+            sendFrame(response.serialize(), on: connection)
+            return
+        }
         connection.send(content: response.serialize(), completion: .contentProcessed { [weak self] _ in
             Task { await self?.close(connection) }
         })
     }
 
+    /// One frame on an open stream. Failure means the peer is gone, so the
+    /// stream is dropped — never retried, never accumulated.
+    private func sendFrame(_ bytes: Data, on connection: NWConnection) {
+        connection.send(content: bytes, completion: .contentProcessed { [weak self] error in
+            guard error != nil else { return }
+            Task { await self?.close(connection) }
+        })
+    }
+
+    /// A client never writes on an event stream, so the only thing that can
+    /// arrive is the peer hanging up. Without this a closed tab sits in
+    /// CLOSE_WAIT until the next broadcast happens to fail, which for a phone
+    /// that is simply idle could be never.
+    private func watchForPeerClose(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] _, _, isComplete, error in
+            guard isComplete || error != nil else { return }
+            Task { await self?.close(connection) }
+        }
+    }
+
     private func close(_ connection: NWConnection) {
         connection.cancel()
         connections.removeValue(forKey: ObjectIdentifier(connection))
+        sseStreams.remove(ObjectIdentifier(connection))
         clearReadDeadline(for: connection)
     }
 

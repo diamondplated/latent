@@ -160,8 +160,36 @@ actor PhoneAccessController: ServeDelegate {
             await shared.unshareAll()
             sharedFolder = folder
         }
-        guard let folder else { return }
-        await shared.share(folder: folder, photos: urls)
+        if let folder {
+            await shared.share(folder: folder, photos: urls)
+        }
+        // Re-sharing retires and re-mints every photo ID, so every ID the
+        // phone is holding just went stale. A per-photo frame would be
+        // addressed to IDs that no longer resolve — `reload` is what tells it
+        // to go and get the new ones. Closing the folder broadcasts too: the
+        // phone has to be told the folder is gone, not left showing it.
+        await server.broadcast(SSEFrame.encode(event: "reload", data: #"{"reload":true}"#))
+    }
+
+    /// Push one photo's current state to every connected phone.
+    ///
+    /// Called from `AppState.dispatch`, which is the single funnel both the
+    /// Mac's keyboard and the phone's swipes go through — so a `⇧P` on the Mac
+    /// and a swipe on the phone publish by the same path, and neither can be
+    /// added later without the other coming along.
+    func publish(url: URL, picked: Bool, rejected: Bool, label: Int) async {
+        guard endpoint != nil else { return }
+        // ponytail: linear scan over the shared photo list. A pick is a human
+        // keystroke, so this runs at human rate; swap in a reverse map if a
+        // folder ever makes it show up.
+        guard let id = await shared.photoID(for: url) else { return }
+        let payload: [String: Any] = [
+            "id": id, "picked": picked, "rejected": rejected, "label": label,
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        await server.broadcast(
+            SSEFrame.encode(event: "photo", data: String(decoding: json, as: UTF8.self))
+        )
     }
 
     // MARK: - ServeDelegate

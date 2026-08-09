@@ -152,7 +152,14 @@ public struct HTTPResponse: Sendable {
     public func serialize() -> Data {
         var head = "HTTP/1.1 \(status) \(Self.reason(status))\r\n"
         var all = headers
-        all["Content-Length"] = String(body.count)
+        // An event stream has no length to declare — `body` is only its first
+        // frame. Sending a Content-Length would tell the browser the response
+        // ended there, and every later frame would be dropped as trailing
+        // garbage. Without one the response runs until the connection closes,
+        // which is exactly the lifetime of the stream.
+        if all["Content-Type"] != SSEFrame.contentType {
+            all["Content-Length"] = String(body.count)
+        }
         // The client is served from this same origin, so no CORS. Deny
         // framing and sniffing rather than leaving the browser to guess.
         all["X-Content-Type-Options"] = "nosniff"
