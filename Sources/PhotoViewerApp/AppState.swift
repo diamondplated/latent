@@ -26,7 +26,13 @@ final class AppState {
     /// immediately when phone access is off, so the common case costs one
     /// no-op task.
     var imageURLs: [URL] = [] {
-        didSet { Task { await phoneAccess.syncSharedFolder() } }
+        didSet {
+            // Re-sharing retires and re-mints every photo ID, so a no-op
+            // assignment — a re-sort that changed nothing, a trash sweep that
+            // matched nothing — must not trigger one.
+            guard oldValue != imageURLs else { return }
+            Task { await phoneAccess.syncSharedFolder() }
+        }
     }
 
     /// Phone companion. Created on first touch — nothing listens on the

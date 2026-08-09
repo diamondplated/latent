@@ -6,7 +6,10 @@ import CoreImage.CIFilterBuiltins
 /// QR generation via CoreImage. No dependency needed — `CIQRCodeGenerator`
 /// has shipped since macOS 10.9.
 enum QRRenderer {
-    static func image(for string: String, size: CGFloat) -> NSImage? {
+    /// `size` is in points. The bitmap is rendered at `scale`× that so a
+    /// Retina display has real pixels to draw rather than an upscale — a soft
+    /// QR is a QR a camera has to work at.
+    static func image(for string: String, size: CGFloat, scale: CGFloat = 2) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(string.utf8)
         // Medium correction: the code is read off a bright screen at close
@@ -14,8 +17,8 @@ enum QRRenderer {
         filter.correctionLevel = "M"
         guard let output = filter.outputImage, output.extent.width > 0 else { return nil }
 
-        let scale = size / output.extent.width
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let factor = (size * scale) / output.extent.width
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: factor, y: factor))
 
         let context = CIContext()
         guard let cg = context.createCGImage(scaled, from: scaled.extent) else { return nil }

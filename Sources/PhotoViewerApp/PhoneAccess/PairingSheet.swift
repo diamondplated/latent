@@ -60,6 +60,19 @@ struct PairingSheet: View {
         .onChange(of: ui.pairingURL, initial: true) { _, url in
             qr = url.flatMap { QRRenderer.image(for: $0, size: 240) }
         }
+        // A code dies after `codeLifetime`. Someone who opens the sheet, walks
+        // to the couch and then scans would otherwise get a 401 on the phone
+        // and nothing at all on the Mac. Rotate before it lapses; the task
+        // dies with the sheet.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(PairingManager.codeLifetime - 15))
+                // `pairingURL == nil` means the sheet is closing and the code
+                // has been cleared — do not mint a fresh one behind it.
+                guard !Task.isCancelled, ui.isEnabled, ui.pairingURL != nil else { return }
+                turnOn()
+            }
+        }
     }
 
     // MARK: - Sections
@@ -84,9 +97,10 @@ struct PairingSheet: View {
         if let url = ui.pairingURL {
             VStack(alignment: .leading, spacing: 12) {
                 if let qr {
+                    // Natural size is 240 pt over a 480 px bitmap — drawn 1:1
+                    // on Retina. No `.resizable()`: rescaling is what softens
+                    // the modules.
                     Image(nsImage: qr)
-                        .interpolation(.none)
-                        .frame(width: 240, height: 240)
                         .frame(maxWidth: .infinity)
                 }
                 Text(url)

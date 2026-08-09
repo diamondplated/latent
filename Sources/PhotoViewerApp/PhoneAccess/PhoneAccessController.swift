@@ -47,11 +47,24 @@ actor PhoneAccessController: ServeDelegate {
     /// is switched off.
     private var endpoint: String?
 
+    /// The folder currently published to the phone. Only ever one, and only
+    /// ever the one open on the Mac.
+    private var sharedFolder: URL?
+
     /// The pairing request currently waiting on a human. `awaitingApproval`
     /// is set before the first suspension point so two concurrent requests
     /// cannot both reach the continuation and orphan one of them.
+    ///
+    /// `earlyAnswer` covers the window between "prompt shown" and "continuation
+    /// installed" — there is a main-actor hop in there, and a resolve landing
+    /// inside it finds no continuation to resume. Without it that request parks
+    /// forever, `awaitingApproval` never clears (the `defer` never runs), and
+    /// every later pairing attempt is refused until the user turns the feature
+    /// off. It holds a full answer rather than a cancel flag because the prompt
+    /// is on screen for the whole window: an Allow can land there too.
     private var pendingApproval: CheckedContinuation<Bool, Never>?
     private var awaitingApproval = false
+    private var earlyAnswer: Bool?
 
     /// Read by the pairing sheet. Safe to touch from the main actor without
     /// hopping: it is a `let` holding a main-actor-isolated (hence Sendable)
@@ -102,6 +115,7 @@ actor PhoneAccessController: ServeDelegate {
         await pairing.revokeAll()
         await shared.unshareAll()
         endpoint = nil
+        sharedFolder = nil
         await MainActor.run { [ui] in
             ui.isEnabled = false
             ui.pairingURL = nil
@@ -133,10 +147,20 @@ actor PhoneAccessController: ServeDelegate {
     func syncSharedFolder() async {
         guard endpoint != nil, let state else { return }
         let (folder, urls) = await MainActor.run { (state.folder, state.imageURLs) }
-        guard let folder else {
+        // Re-check after the hop: a `disable()` that landed while we were on
+        // the main actor has already unshared, and re-populating now would
+        // resurrect a folder for a listener that is gone.
+        guard endpoint != nil else { return }
+
+        // `SharedFolders.share` *appends* when the folder is not already
+        // registered — it replaces a folder's photo list, never the folder
+        // set. So the folder the user left has to be dropped explicitly, or
+        // it stays listed and every photo ID it issued stays resolvable.
+        if sharedFolder != folder {
             await shared.unshareAll()
-            return
+            sharedFolder = folder
         }
+        guard let folder else { return }
         await shared.share(folder: folder, photos: urls)
     }
 
@@ -147,13 +171,21 @@ actor PhoneAccessController: ServeDelegate {
         // `pendingApproval` and the first phone would wait forever.
         guard !awaitingApproval else { return false }
         awaitingApproval = true
+        earlyAnswer = nil
         defer { awaitingApproval = false }
 
         await MainActor.run { [ui] in
             ui.pendingDevice = PhoneAccessUI.PendingDevice(name: deviceName, host: fromHost)
         }
         let approved = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-            pendingApproval = c
+            // A resolve that landed during the hop above set the flag instead
+            // of finding a continuation. Honour it here rather than parking on
+            // one nobody will ever resume.
+            if let earlyAnswer {
+                c.resume(returning: earlyAnswer)
+            } else {
+                pendingApproval = c
+            }
         }
         pendingApproval = nil
         await MainActor.run { [ui] in ui.pendingDevice = nil }
@@ -167,8 +199,14 @@ actor PhoneAccessController: ServeDelegate {
     /// Called by the sheet's Allow / Deny buttons, and by anything that ends
     /// the pairing session. Safe to call with nothing pending.
     func resolveApproval(_ approved: Bool) {
-        pendingApproval?.resume(returning: approved)
-        pendingApproval = nil
+        if let pendingApproval {
+            self.pendingApproval = nil
+            pendingApproval.resume(returning: approved)
+            return
+        }
+        // A request is prompting but has not reached its continuation yet.
+        // Leave the answer where `approvePairing` will pick it up.
+        if awaitingApproval { earlyAnswer = approved }
     }
 
     func folderList() async -> [SharedFolderSummary] {
@@ -216,6 +254,12 @@ actor PhoneAccessController: ServeDelegate {
     func apply(action: PhoneAction, photoID: String) async {
         guard let state, let url = await shared.photoURL(forID: photoID) else { return }
         await MainActor.run {
+            // A resolved ID is not proof the photo is still in scope. If the
+            // Mac has moved on, `select(url:)` silently no-ops but the keymap
+            // mutation would still land — writing a foreign absolute path into
+            // the *current* folder's sidecar, which rehydrates as garbage on
+            // the next load. This layer owns that contract, so it checks.
+            guard state.imageURLs.contains(url) else { return }
             // Select the photo the phone is looking at, then dispatch. Mutating
             // actions in VimKeymap operate on the current selection, so the
             // selection move is part of applying the action, not a side effect.
