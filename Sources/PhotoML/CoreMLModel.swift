@@ -95,16 +95,6 @@ public struct TensorSpec: Sendable {
         inputRange: (0, 1)
     )
 
-    /// GFPGAN face-restore default spec. Operates on 512×512 face crops.
-    public static let gfpgan = TensorSpec(
-        inputName: "input",
-        outputName: "output",
-        channelOrder: .rgb,
-        dataType: .float32,
-        layout: .nchw,
-        inputRange: (-1, 1)  // GFPGAN normalizes to [-1, 1] internally
-    )
-
     /// OpenCLIP ViT-B/32 image encoder. The conversion script bakes CLIP's
     /// per-channel mean/std normalization into the model so this side only
     /// sends [0, 1] images. Output is a 512-dim embedding tensor.

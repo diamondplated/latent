@@ -13,7 +13,7 @@ swift run Latent           # launch the viewer
 ```
 
 Models are optional. With `Resources/Models/` empty, every stage still runs: Sharpen works
-classically, Upscale falls back to Lanczos, and Denoise / ArtifactRemoval / FaceRestore fast-path to
+classically, Upscale falls back to Lanczos, and Denoise / ArtifactRemoval fast-path to
 identity. You do not need 1.2 GB of weights to work on the viewer, the cache, the vim keymap, or the
 search plumbing.
 
@@ -24,8 +24,8 @@ pip install -r scripts/requirements.txt
 ./scripts/setup_models.sh          # or run individual scripts/convert_*.py
 ```
 
-**Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) first.** The models come from five different
-upstream projects under four different licenses, and GFPGAN's has non-commercial carve-outs.
+**Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) first.** The models come from four different
+upstream projects, all permissively licensed.
 
 ## Verifying a change
 

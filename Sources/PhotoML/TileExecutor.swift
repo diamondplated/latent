@@ -33,13 +33,13 @@ public enum TileExecutorError: Error, CustomStringConvertible {
 /// feathered alpha at overlap regions.
 ///
 /// Used to apply CoreML models that have fixed-or-bounded input sizes to
-/// arbitrary-resolution photos. Most super-resolution / denoise / face-restore
+/// arbitrary-resolution photos. Most super-resolution and denoise
 /// models are trained on 256–512px patches and break down or run out of memory
 /// on full-resolution input — tiling with overlap-and-blend is the standard fix.
 ///
 /// `process` receives an `ImageBuffer` of size up to `tileSize × tileSize` (edge
 /// tiles may be smaller) and must return one of size `(input.w × scale, input.h × scale)`.
-/// `scale = 1` for denoise/face-restore; `2` or `4` for upscalers.
+/// `scale = 1` for denoise and artifact removal; `2` or `4` for upscalers.
 ///
 /// Math is done in Float32 for precision, then quantized to Float16 for storage.
 public struct TileExecutor: Sendable {

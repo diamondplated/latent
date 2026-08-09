@@ -37,8 +37,6 @@ final class EnhancementState {
     var denoiseEnabled: Bool = false
     var denoiseParams: Denoise.Params = .init()
 
-    var faceRestoreEnabled: Bool = false
-    var faceRestoreParams: FaceRestore.Params = .init()
 
     var upscaleEnabled: Bool = true
     var upscaleParams: Upscale.Params = .init()
@@ -511,11 +509,6 @@ final class EnhancementState {
                 stage: AnyStage(Denoise(), params: denoiseParams),
                 enabled: denoiseEnabled
                     && StageStatusResolver.denoise().isOperational
-            ),
-            PipelineStep(
-                stage: AnyStage(FaceRestore(), params: faceRestoreParams),
-                enabled: faceRestoreEnabled
-                    && StageStatusResolver.faceRestore().isOperational
             ),
             PipelineStep(
                 stage: AnyStage(Upscale(), params: upscaleParams),

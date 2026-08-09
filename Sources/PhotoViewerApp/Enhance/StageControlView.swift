@@ -73,54 +73,6 @@ struct DenoiseControls: View {
 }
 
 @MainActor
-struct FaceRestoreControls: View {
-    @Bindable var state: EnhancementState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Enabled", isOn: Binding(
-                get: { state.faceRestoreEnabled },
-                set: { state.faceRestoreEnabled = $0; state.runPipeline() }
-            ))
-            sliderRow(
-                label: "Strength",
-                value: Binding(
-                    get: { state.faceRestoreParams.strength },
-                    set: { state.faceRestoreParams.strength = $0 }
-                ),
-                range: 0...1,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
-            sliderRow(
-                label: "Identity preserve",
-                value: Binding(
-                    get: { state.faceRestoreParams.identityPreserveBias },
-                    set: { state.faceRestoreParams.identityPreserveBias = $0 }
-                ),
-                range: 0...1,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
-            // minFaceSize is an Int in pixels — 16…512 covers the realistic
-            // range. Step 8 keeps the slider feel reasonable.
-            sliderRow(
-                label: "Min face size (px)",
-                value: Binding(
-                    get: { Double(state.faceRestoreParams.minFaceSize) },
-                    set: { state.faceRestoreParams.minFaceSize = Int($0) }
-                ),
-                range: 16...512,
-                step: 8,
-                format: "%.0f",
-                onCommit: { state.runPipeline() }
-            )
-        }
-        .disabled(!state.faceRestoreEnabled)
-    }
-}
-
-@MainActor
 struct UpscaleControls: View {
     @Bindable var state: EnhancementState
 

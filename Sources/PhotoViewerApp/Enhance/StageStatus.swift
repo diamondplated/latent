@@ -63,11 +63,6 @@ enum StageStatusResolver {
             : .mlMissingPlacebo
     }
 
-    static func faceRestore() -> StageStatus {
-        ModelRegistry.url(for: .faceRestoreGFPGAN) != nil
-            ? .mlActive
-            : .mlMissingPlacebo
-    }
 
     /// Upscale degrades to Lanczos resize when no model is present — real
     /// resampling, just not ML super-resolution. Worth distinguishing from

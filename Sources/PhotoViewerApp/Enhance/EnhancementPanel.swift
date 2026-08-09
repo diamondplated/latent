@@ -10,7 +10,6 @@ struct EnhancementPanel: View {
     /// pipeline emphasizes so a brand-new user sees something useful first.
     @State private var artifactRemovalExpanded: Bool = false
     @State private var denoiseExpanded: Bool = true
-    @State private var faceRestoreExpanded: Bool = false
     @State private var upscaleExpanded: Bool = true
     @State private var sharpenExpanded: Bool = false
 
@@ -57,14 +56,6 @@ struct EnhancementPanel: View {
                         status: StageStatusResolver.artifactRemoval()
                     ) {
                         ArtifactRemovalControls(state: state)
-                    }
-                    stageSection(
-                        title: "Face Restore",
-                        isExpanded: $faceRestoreExpanded,
-                        enabled: state.faceRestoreEnabled,
-                        status: StageStatusResolver.faceRestore()
-                    ) {
-                        FaceRestoreControls(state: state)
                     }
 
                     Spacer(minLength: 8)

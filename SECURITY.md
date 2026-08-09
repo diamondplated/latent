@@ -64,8 +64,8 @@ The exception is NAFNet: upstream publishes no GitHub release, so there is no ca
 pin. That script does not download anything. It requires you to place the checkpoint yourself and
 prints the SHA256 of what it is about to load.
 
-See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) for what each model is and how it's licensed —
-GFPGAN's terms in particular have non-commercial carve-outs.
+See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) for what each model is and how it's licensed.
+All four are permissively licensed.
 
 ## Out of scope
 

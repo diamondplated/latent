@@ -44,7 +44,7 @@ final class PipelineDAGTests: XCTestCase {
         let coldCompletions = coldEvents.compactMap { e -> (StageID, Bool)? in
             if case .complete(let id, let hit) = e { return (id, hit) } else { return nil }
         }
-        XCTAssertEqual(coldCompletions.count, 5)
+        XCTAssertEqual(coldCompletions.count, 4)
         XCTAssertTrue(coldCompletions.allSatisfy { !$0.1 }, "cold run should have no cache hits")
 
         let warm = RecordingObserver()
@@ -53,7 +53,7 @@ final class PipelineDAGTests: XCTestCase {
         let warmCompletions = warmEvents.compactMap { e -> (StageID, Bool)? in
             if case .complete(let id, let hit) = e { return (id, hit) } else { return nil }
         }
-        XCTAssertEqual(warmCompletions.count, 5)
+        XCTAssertEqual(warmCompletions.count, 4)
         XCTAssertTrue(warmCompletions.allSatisfy { $0.1 }, "warm run should hit cache for every stage")
     }
 
@@ -77,12 +77,12 @@ final class PipelineDAGTests: XCTestCase {
         let completions = events.compactMap { e -> (StageID, Bool)? in
             if case .complete(let id, let hit) = e { return (id, hit) } else { return nil }
         }
-        XCTAssertEqual(completions.count, 4)
+        XCTAssertEqual(completions.count, 3)
 
         let artifactRemoval = completions.first { $0.0 == "artifact-removal-fbcnn" }
         XCTAssertEqual(artifactRemoval?.1, true, "stage upstream of bypass should still cache-hit")
 
-        let downstream: Set<StageID> = ["face-restore-gfpgan", "upscale", "sharpen-unsharp-mask"]
+        let downstream: Set<StageID> = ["upscale", "sharpen-unsharp-mask"]
         for (id, hit) in completions where downstream.contains(id) {
             XCTAssertFalse(hit, "downstream stage \(id) should miss cache after bypass change")
         }
@@ -96,7 +96,7 @@ final class PipelineDAGTests: XCTestCase {
         _ = try await pipeline.run(input: makeInput(seed: 2))
 
         let count = await cache.count
-        XCTAssertEqual(count, 10, "two distinct inputs × 5 stages = 10 cached intermediates")
+        XCTAssertEqual(count, 8, "two distinct inputs × 4 stages = 8 cached intermediates")
     }
 
     func testCancellationStopsPipeline() async throws {

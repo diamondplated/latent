@@ -2,14 +2,13 @@
 # One-shot installer for Latent's CoreML models.
 #
 # Without this run, the model-dependent stages (Denoise, Artifact Removal,
-# Face Restore, plus Real-ESRGAN super-resolution for Upscale) are
+# plus Real-ESRGAN super-resolution for Upscale) are
 # placebos / fall back to Lanczos. After this run they're real ML.
 #
 # Models converted (and their sizes):
 #   - Real-ESRGAN x2 super-resolution     ~64 MB
 #   - NAFNet-SIDD denoiser                ~280 MB
 #   - FBCNN JPEG artifact removal         ~340 MB
-#   - GFPGAN v1.4 face restoration        ~340 MB
 #   - OpenCLIP ViT-B/32 image+text        ~150 MB (each encoder)
 #
 # Total: ~1.2 GB, all stored in Resources/Models/. None of this gets
@@ -87,8 +86,6 @@ echo "==> Converting FBCNN (JPEG artifact removal)"
 "$VENV_PYTHON" "$REPO_ROOT/scripts/convert_fbcnn.py"
 
 echo
-echo "==> Converting GFPGAN v1.4 (face restoration)"
-"$VENV_PYTHON" "$REPO_ROOT/scripts/convert_gfpgan.py"
 
 echo
 echo "==> Converting OpenCLIP ViT-B/32 (image + text encoders for search)"

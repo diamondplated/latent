@@ -6,7 +6,6 @@ public enum ModelID: String, Sendable, CaseIterable {
     case upscaleRealESRGANx4 = "upscale-realesrgan-x4"
     case upscaleSwinIRLarge = "upscale-swinir-large"
     case denoiseNAFNet = "denoise-nafnet"
-    case faceRestoreGFPGAN = "face-restore-gfpgan"
     case artifactRemovalFBCNN = "artifact-removal-fbcnn"
     case openCLIPImageEncoder = "openclip-vitb32-image"
     case openCLIPTextEncoder = "openclip-vitb32-text"

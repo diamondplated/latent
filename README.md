@@ -41,8 +41,8 @@ files stay exactly where they are, and everything the app can do runs on your ow
   catalog file, no migration when you change your mind.
 - ⌨️ **Vim keymap.** `j`/`k`, `gg`/`G`, marks, picks, rejects, colour labels. If you've culled a
   shoot before, your fingers already know it.
-- ✨ **Five-stage enhancement**, all local — upscale, denoise, artifact removal, face restore,
-  sharpen — with live A/B compare and non-destructive sidecars.
+- ✨ **Four-stage enhancement**, all local — upscale, denoise, artifact removal, sharpen — with
+  live A/B compare and non-destructive sidecars.
 - 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
   your Mac.
 - 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
@@ -99,8 +99,8 @@ pip install -r scripts/requirements.txt
 ./scripts/setup_models.sh
 ```
 
-> **Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) first.** The five models come from five
-> upstream projects under four different licenses, and GFPGAN's has non-commercial carve-outs.
+> See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) for what each model is. All four are
+> permissively licensed, and downloads are checksum-verified.
 
 ### Opening folders
 
@@ -147,12 +147,8 @@ installed:
 |---|---|---|
 | **Artifact removal** | FBCNN | passes through |
 | **Denoise** | NAFNet | passes through |
-| **Face restore** | GFPGAN v1.4 | passes through |
 | **Upscale** | Real-ESRGAN x2 | Lanczos resize |
 | **Sharpen** | *none — Core Image* | always works |
-
-Face restore uses Apple's Vision framework to detect faces, crops each one, runs the model, and
-alpha-composites it back with a feathered edge — so an image with no detectable faces costs nothing.
 
 **The cache is the clever part.** Each stage's output is keyed on the input hash *plus* the ordered
 list of `(stageID, paramsHash)` for every enabled prior stage. Toggle a stage off and upstream cache
@@ -278,10 +274,10 @@ Latent is pre-1.0. It is a working app, not a shipped product:
 [MIT](LICENSE) for Latent's own code.
 
 Latent ships **no model weights** — `Resources/Models/` is gitignored and the conversion scripts
-download from upstream at your initiative. Those weights carry their own terms, and they are not all
-permissive: GFPGAN's license has non-commercial carve-outs (StyleGAN2 under NVIDIA's license, DFDNet
-under CC BY-NC-SA 4.0). Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) before shipping anything
-commercial built on the FaceRestore stage. Every other stage's model is permissively licensed.
+download from upstream at your initiative. Every model Latent uses is permissively licensed: NAFNet
+(MIT), FBCNN (Apache-2.0), Real-ESRGAN (BSD-3-Clause), OpenCLIP (MIT). See
+[THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md), which also explains why there is no face-restoration
+stage.
 
 ## Contributing
 

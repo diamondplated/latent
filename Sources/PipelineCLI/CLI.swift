@@ -35,8 +35,7 @@ struct PipelineCLI {
         failures += await runVerification("TileExecutor single-tile fast path is exact identity", check: tileExecutorSingleTile)
         failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
         failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
-        failures += await runVerification("FaceRestore is identity for an image with no detectable faces", check: faceRestoreNoFaces)
-        failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
+            failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
         failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
         failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
         failures += await runVerification("CLIPBPETokenizer init from minimal merges file produces 77-token output with SOS/EOS", check: tokenizerSmokeTest)
@@ -152,7 +151,7 @@ func coldRunMissesAll() async throws {
     let obs = RecordingObserver()
     _ = try await pipeline.run(input: makeInput(), observer: obs)
     let comps = completions(await obs.snapshot())
-    try require(comps.count == 5, "expected 5 completions, got \(comps.count)")
+    try require(comps.count == 4, "expected 4 completions, got \(comps.count)")
     try require(comps.allSatisfy { !$0.1 }, "expected all cold cache misses, got hits: \(comps.filter { $0.1 }.map { $0.0 })")
 }
 
@@ -165,7 +164,7 @@ func warmRunHitsAll() async throws {
     let obs = RecordingObserver()
     _ = try await pipeline.run(input: input, observer: obs)
     let comps = completions(await obs.snapshot())
-    try require(comps.count == 5, "expected 5 completions, got \(comps.count)")
+    try require(comps.count == 4, "expected 4 completions, got \(comps.count)")
     try require(comps.allSatisfy { $0.1 }, "expected all cache hits, got misses: \(comps.filter { !$0.1 }.map { $0.0 })")
 }
 
@@ -186,12 +185,12 @@ func bypassRecomputesDownstream() async throws {
     try require(!events.contains(.start("denoise-nafnet")), "denoise must not run when disabled")
 
     let comps = completions(events)
-    try require(comps.count == 4, "expected 4 completions (denoise skipped), got \(comps.count)")
+    try require(comps.count == 3, "expected 3 completions (denoise skipped), got \(comps.count)")
 
     let artifactRemoval = comps.first { $0.0 == "artifact-removal-fbcnn" }
     try require(artifactRemoval?.1 == true, "upstream stage should still cache-hit; got \(String(describing: artifactRemoval))")
 
-    let downstream: Set<StageID> = ["face-restore-gfpgan", "upscale", "sharpen-unsharp-mask"]
+    let downstream: Set<StageID> = ["upscale", "sharpen-unsharp-mask"]
     for (id, hit) in comps where downstream.contains(id) {
         try require(!hit, "downstream stage \(id) should miss cache after bypass change")
     }
@@ -203,7 +202,7 @@ func distinctInputsDontCollide() async throws {
     _ = try await pipeline.run(input: makeInput(seed: 1))
     _ = try await pipeline.run(input: makeInput(seed: 2))
     let count = await cache.count
-    try require(count == 10, "expected 10 cached intermediates (2 inputs × 5 stages), got \(count)")
+    try require(count == 8, "expected 8 cached intermediates (2 inputs × 4 stages), got \(count)")
 }
 
 func sidecarRoundTrip() async throws {
@@ -566,20 +565,6 @@ func tokenizerSmokeTest() async throws {
         try require(ids[i] >= 0 && ids[i] < tokenizer.vocabSize,
                     "token \(ids[i]) at index \(i) out of vocab range")
     }
-}
-
-func faceRestoreNoFaces() async throws {
-    // Synthetic gradient has no faces. FaceRestore should detect zero faces
-    // and return input unchanged (no model call needed).
-    let input = makeGradientBuffer(width: 256, height: 256)
-    let stage = FaceRestore()
-    let output = try await stage.process(
-        input: input,
-        params: .init(strength: 0.7, minFaceSize: 64, identityPreserveBias: 0.5),
-        progress: .noop
-    )
-    try require(output.width == 256 && output.height == 256, "dimensions changed")
-    try require(output.pixels == input.pixels, "no-faces fast path should pass through bytes unchanged")
 }
 
 func tileExecutorUpscaleDimensions() async throws {

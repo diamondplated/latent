@@ -7,7 +7,7 @@ import PhotoML
 /// All stages currently return their input unchanged. The DAG, caching,
 /// progress reporting, and sidecar serialization are exercised end-to-end;
 /// the actual ML inference is the next milestone (CoreML model loading,
-/// tile-based execution, alpha-blending for face restore).
+/// tile-based execution).
 ///
 /// Each stage's parameters are real and final — adding ML below them does
 /// not change the public surface.
@@ -69,82 +69,6 @@ public struct Denoise: Stage {
         )
     }
 }
-
-// MARK: - Face restore (GFPGAN)
-
-public struct FaceRestore: Stage {
-    public struct Params: StageParameters, Codable {
-        public var strength: Double            // 0.0 = bypass, 1.0 = max
-        public var minFaceSize: Int            // pixels; faces smaller than this are skipped
-        public var identityPreserveBias: Double // 0.0 = enhance more, 1.0 = preserve identity
-
-        public init(strength: Double = 0.7, minFaceSize: Int = 64, identityPreserveBias: Double = 0.7) {
-            self.strength = strength
-            self.minFaceSize = minFaceSize
-            self.identityPreserveBias = identityPreserveBias
-        }
-    }
-
-    public let id: StageID = "face-restore-gfpgan"
-    public let displayName = "Face Restore"
-    public init() {}
-
-    /// Algorithm:
-    ///   1. Detect faces (Apple Vision)
-    ///   2. For each face: pad bounds, crop, resize to model input (512×512),
-    ///      run model, resize back to crop dims
-    ///   3. Composite each restored face into a copy of input with feathered
-    ///      alpha at face-region edges
-    /// Falls back to identity if (a) no faces detected, (b) all faces below
-    /// minFaceSize, or (c) the model file isn't available.
-    public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
-        progress.report(0.0)
-        defer { progress.report(1.0) }
-
-        if params.strength == 0 { return input }
-
-        let detector = FaceDetector()
-        let faces = try await detector.detect(in: input)
-            .filter { Int($0.bounds.width) >= params.minFaceSize && Int($0.bounds.height) >= params.minFaceSize }
-
-        if faces.isEmpty { return input }
-
-        let model = try await ModelManager.shared.model(for: .faceRestoreGFPGAN, spec: .gfpgan)
-        guard let model else { return input }
-
-        // GFPGAN's standard input size.
-        let modelInputSize = 512
-        // The reference identity-preserve bias maps to a strength multiplier:
-        // higher bias = lighter blend (more original face preserved). At
-        // identityPreserveBias=0, full strength; at 1, blend factor halves.
-        let blendStrength = Float(params.strength) * (1.0 - 0.5 * Float(params.identityPreserveBias))
-
-        var result = input
-        for (i, face) in faces.enumerated() {
-            let rect = FaceComposite.paddedFaceRect(
-                face: face,
-                imageWidth: input.width,
-                imageHeight: input.height
-            )
-            let crop = FaceComposite.crop(input, rect: rect)
-            let modelInput = try FaceComposite.resize(crop, toWidth: modelInputSize, height: modelInputSize)
-            let modelOutput = try await model.predict(modelInput)
-            let restored = try FaceComposite.resize(modelOutput, toWidth: Int(rect.width), height: Int(rect.height))
-
-            result = FaceComposite.blend(
-                base: result,
-                restored: restored,
-                atRect: rect,
-                featherWidth: 16,
-                strength: blendStrength
-            )
-            progress.report(Double(i + 1) / Double(faces.count))
-        }
-        return result
-    }
-}
-
-// MARK: - Upscale (Real-ESRGAN)
 
 public struct Upscale: Stage {
     public enum Model: String, Codable, Sendable {
@@ -276,12 +200,11 @@ public struct Sharpen: Stage {
 // MARK: - Default pipeline factory
 
 public enum StandardPipeline {
-    /// Builds the canonical 5-stage pipeline in correct order with default parameters.
+    /// Builds the canonical 4-stage pipeline in correct order with default parameters.
     public static func defaultSteps() -> [PipelineStep] {
         [
             PipelineStep(stage: AnyStage(ArtifactRemoval(), params: .init())),
             PipelineStep(stage: AnyStage(Denoise(), params: .init())),
-            PipelineStep(stage: AnyStage(FaceRestore(), params: .init())),
             PipelineStep(stage: AnyStage(Upscale(), params: .init(scale: 2))),
             PipelineStep(stage: AnyStage(Sharpen(), params: .init())),
         ]
