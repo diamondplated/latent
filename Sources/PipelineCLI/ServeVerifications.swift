@@ -272,3 +272,131 @@ func pairingStoresTokenHashNotToken() async throws {
     try require(devices[0].tokenHash != token, "the raw token must not be retained")
     try require(devices[0].tokenHash.count == 64, "expected a SHA-256 hex digest, got \(devices[0].tokenHash.count) chars")
 }
+
+// MARK: - Router verifications
+
+/// Minimal delegate that records what the router asked for.
+actor StubServeDelegate: ServeDelegate {
+    var actionsApplied: [(String, PhoneAction)] = []
+    var approvalAnswer = true
+
+    func setApprovalAnswer(_ v: Bool) { approvalAnswer = v }
+
+    func approvePairing(deviceName: String, fromHost: String) async -> Bool { approvalAnswer }
+    func folderList() async -> [SharedFolderSummary] {
+        [SharedFolderSummary(id: "F1", name: "2024", photoCount: 1)]
+    }
+    func photoList(folderID: String) async -> [PhonePhoto] {
+        [PhonePhoto(id: "P1", name: "a.jpg", isPicked: false, isRejected: false, colorLabel: 0)]
+    }
+    func thumbnailJPEG(photoID: String) async -> Data? {
+        photoID == "P1" ? Data([0xFF, 0xD8, 0xFF]) : nil
+    }
+    func previewJPEG(photoID: String) async -> Data? {
+        photoID == "P1" ? Data([0xFF, 0xD8, 0xFF, 0xE0]) : nil
+    }
+    func apply(action: PhoneAction, photoID: String) async {
+        actionsApplied.append((photoID, action))
+    }
+    func search(folderID: String, query: String) async -> [String]? { nil }
+    func recorded() -> [(String, PhoneAction)] { actionsApplied }
+}
+
+func routerRefusesUnauthenticatedAPIRequests() async throws {
+    let pairing = PairingManager()
+    let router = Router(pairing: pairing, delegate: StubServeDelegate())
+
+    let req = HTTPRequest(parsing: Data("GET /api/folders HTTP/1.1\r\n\r\n".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 401, "expected 401 without a token, got \(res.status)")
+}
+
+func routerRefusesNonPrivateHosts() async throws {
+    let pairing = PairingManager()
+    let router = Router(pairing: pairing, delegate: StubServeDelegate())
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    let req = HTTPRequest(parsing: Data("GET /api/folders HTTP/1.1\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8))!
+    let res = await router.handle(req, from: "8.8.8.8")
+    try require(res.status == 403, "a valid token from a public address must still be refused, got \(res.status)")
+}
+
+func routerServesAPIWithValidToken() async throws {
+    let pairing = PairingManager()
+    let router = Router(pairing: pairing, delegate: StubServeDelegate())
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    let req = HTTPRequest(parsing: Data("GET /api/folders HTTP/1.1\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 200, "expected 200, got \(res.status)")
+
+    let json = try JSONSerialization.jsonObject(with: res.body) as? [String: Any]
+    let folders = json?["folders"] as? [[String: Any]]
+    try require(folders?.count == 1, "expected 1 folder in the payload")
+    try require(folders?[0]["name"] as? String == "2024", "folder name missing")
+}
+
+func routerPairingRequiresApproval() async throws {
+    let pairing = PairingManager()
+    let delegate = StubServeDelegate()
+    let router = Router(pairing: pairing, delegate: delegate)
+    // The router validates against the wall clock, so the code has to be
+    // issued on it too — a fixed epoch would read as expired.
+    let code = await pairing.issueCode()
+
+    await delegate.setApprovalAnswer(false)
+    let body = #"{"code":"\#(code)","deviceName":"iPhone"}"#
+    let denied = HTTPRequest(parsing: Data("POST /api/pair HTTP/1.1\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8))!
+    let res = await router.handle(denied, from: "192.168.1.9")
+    try require(res.status == 403, "a declined pairing must not issue a token, got \(res.status)")
+    let devices = await pairing.devices()
+    try require(devices.isEmpty, "no device may be registered when approval is declined")
+}
+
+func routerPairingIssuesTokenWhenApproved() async throws {
+    let pairing = PairingManager()
+    let router = Router(pairing: pairing, delegate: StubServeDelegate())
+    let code = await pairing.issueCode()
+
+    let body = #"{"code":"\#(code)","deviceName":"iPhone"}"#
+    let req = HTTPRequest(parsing: Data("POST /api/pair HTTP/1.1\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 200, "expected 200, got \(res.status)")
+
+    let json = try JSONSerialization.jsonObject(with: res.body) as? [String: Any]
+    let token = json?["token"] as? String
+    try require(token != nil, "response carried no token")
+    let tokenValidates = await pairing.isValidToken(token!)
+    try require(tokenValidates, "issued token does not validate")
+}
+
+func routerMapsSwipeActionsToVimActions() async throws {
+    let pairing = PairingManager()
+    let delegate = StubServeDelegate()
+    let router = Router(pairing: pairing, delegate: delegate)
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    let body = #"{"photoID":"P1","action":"pick"}"#
+    let req = HTTPRequest(parsing: Data("POST /api/action HTTP/1.1\r\nAuthorization: Bearer \(token)\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 200, "expected 200, got \(res.status)")
+
+    let recorded = await delegate.recorded()
+    try require(recorded.count == 1, "expected 1 applied action, got \(recorded.count)")
+    try require(recorded[0].0 == "P1", "wrong photo ID")
+    try require(recorded[0].1 == .pick, "wrong action: \(recorded[0].1)")
+}
+
+func routerRejectsUnknownActionNames() async throws {
+    let pairing = PairingManager()
+    let delegate = StubServeDelegate()
+    let router = Router(pairing: pairing, delegate: delegate)
+    let token = await pairing.registerDevice(name: "iPhone")
+
+    let body = #"{"photoID":"P1","action":"rm -rf"}"#
+    let req = HTTPRequest(parsing: Data("POST /api/action HTTP/1.1\r\nAuthorization: Bearer \(token)\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)".utf8))!
+    let res = await router.handle(req, from: "192.168.1.9")
+    try require(res.status == 400, "unknown action must be rejected, got \(res.status)")
+    let recorded = await delegate.recorded()
+    try require(recorded.isEmpty, "nothing should have been applied")
+}

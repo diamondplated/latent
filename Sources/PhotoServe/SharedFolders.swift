@@ -6,6 +6,12 @@ public struct SharedFolderSummary: Sendable, Equatable {
     public let id: SharedFolderID
     public let name: String
     public let photoCount: Int
+
+    public init(id: SharedFolderID, name: String, photoCount: Int) {
+        self.id = id
+        self.name = name
+        self.photoCount = photoCount
+    }
 }
 
 public struct PhotoEntry: Sendable, Equatable {
