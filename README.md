@@ -1,169 +1,255 @@
-# Latent
+<p align="center">
+  <img src="Resources/AppBundle/Latent.iconset/icon_256x256.png" width="144" alt="Latent app icon">
+</p>
 
-[![CI](https://github.com/diamondplated/latent/actions/workflows/ci.yml/badge.svg)](https://github.com/diamondplated/latent/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">Latent</h1>
 
-A Mac-native photo viewer focused on speed, folder-based browsing, and best-in-class **local** AI enhancement. No cloud calls, no library import, no subscription.
+<p align="center"><strong>Your photos. Your Mac. Nothing in between.</strong></p>
 
-Everything runs on your machine. The only time Latent needs the network is the one-off script that
-downloads model weights, which you run yourself — see [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md)
-for what those models are and how they are licensed. **You can clone, build, and run without any of
-them**: stages without a model fall back to a classical implementation or pass through untouched.
+<p align="center">
+  A folder-first photo viewer with a local AI enhancement pipeline.<br>
+  No library import, no cloud, no account, no subscription.
+</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/diamondplated/latent/actions/workflows/ci.yml"><img src="https://github.com/diamondplated/latent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-6.0-orange.svg" alt="Swift 6.0">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
-This is a working SwiftPM macOS app plus the pipeline/search libraries behind it. The viewer is folder-first, the enhancement panel is model-aware, and the CLI verifier covers the pipeline pieces that cannot run through XCTest on CommandLineTools-only machines.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-it-does">Features</a> ·
+  <a href="#the-enhancement-pipeline">Pipeline</a> ·
+  <a href="THIRD_PARTY_MODELS.md">Models &amp; licensing</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-What's working:
+---
 
-- ✅ `PipelineCore` library — `ImageBuffer`, `Stage` protocol, `Pipeline` chain executor, `IntermediateCache` (LRU, byte-bounded), `EnhanceSidecar` (`.enhance.json` round-trip), `ImageBuffer ↔ CGImage` bridge
-- ✅ `EnhancementStages` — the 5 stages with real parameter shapes and model-aware execution/fallbacks
-  - `ArtifactRemoval` (FBCNN)
-  - `Denoise` (NAFNet)
-  - `FaceRestore` (GFPGAN)
-  - `Upscale` (Real-ESRGAN x4plus / SwinIR-L)
-  - `Sharpen` (classical unsharp mask)
-- ✅ `PhotoIO` library — `ImageReader` / `ImageWriter` with EXIF round-trip, orientation baking (canonical-up pixels for the pipeline), color-space awareness (sRGB / Display P3 / Adobe RGB / ProPhoto), `preserveMetadata: false` for privacy exports
-- ✅ `PhotoML` library — `TileExecutor` (tile + feathered seam blending), `CoreMLImageModel` (image-to-image and tensor-output models), `ModelRegistry` + `ModelManager` (lazy-load with negative caching), `FaceDetector` (Apple Vision), `FaceComposite` (crop, resize, alpha-blend)
-- ✅ All 5 enhancement stages wired:
-  - `Sharpen` — Core Image unsharp mask, no model needed
-  - `Upscale` — Real-ESRGAN x2 model if present, Lanczos resize fallback
-  - `Denoise` (NAFNet), `ArtifactRemoval` (FBCNN) — model if present, identity passthrough otherwise
-  - `FaceRestore` (GFPGAN) — Vision face detection → per-face crop → model → feathered alpha composite; fast-paths to identity if no faces detected or model unavailable
-- ✅ `PhotoSearch` library — `EmbeddingVector` + cosine similarity, `EmbeddingIndex` (per-folder JSON-persisted, staleness-aware), `CLIPImageEncoder` / `CLIPTextEncoder` (OpenCLIP ViT-B/32, 512-dim normalized embeddings), Swift BPE tokenizer, and `SearchEngine` folder indexing with image-image and text queries when converted model/tokenizer assets are installed.
-- ✅ `PhotoViewerApp` — SwiftUI app: folder picker → thumbnail grid (with color labels, picks/rejects from vim) ↔ map view → detail view with vim keymap (j/k/gg/G/marks/picks/labels), in-app pipeline UI (per-stage toggles + sliders + live preview), A/B compare (enhanced / original / side-by-side, hold-B blink), synced zoom/pan (0.25–16×, drag to pan, pinch to zoom, double-tap reset).
-- ✅ `PhotoQuickLook` — `QuickLookRenderer` using ImageIO's downsample fast path. Ready for an Xcode-based QL extension target to import directly.
-- ✅ `scripts/build_app.sh` — packages a real `.app` bundle from `swift build` output, including locally converted model/tokenizer assets. Info.plist registers Latent as a viewer for JPEG/HEIC/PNG/TIFF/RAW etc. so Finder offers `Open With → Latent`.
-- ✅ `pv-pipeline` CLI — self-verification scenarios for cache behavior, sidecars, image I/O, tiling, search primitives, vim state, GPS, Quick Look, and archive extraction
+## Point it at a folder
 
-Still rough:
+Most photo apps want to own your pictures. They import, they catalog, they build a library, and
+your files end up somewhere you didn't put them.
 
-- 🚧 CoreML model assets are not committed. Run the conversion scripts to install `.mlpackage` files under `Resources/Models/` or user Application Support.
-- 🚧 The app is still packaged from SwiftPM. `scripts/build_app.sh` creates a usable `.app`, but distribution-grade signing, sandbox entitlements, and the Quick Look extension target still need an Xcode project.
+Latent opens a folder. That's the whole model. Your directory structure *is* the organization, the
+files stay exactly where they are, and everything the app can do runs on your own machine.
 
-## Build & verify
+- 🗂 **Folder-first.** Drag a folder in, or `open -a Latent ~/Pictures/2024`. No import step, no
+  catalog file, no migration when you change your mind.
+- ⌨️ **Vim keymap.** `j`/`k`, `gg`/`G`, marks, picks, rejects, colour labels. If you've culled a
+  shoot before, your fingers already know it.
+- ✨ **Five-stage enhancement**, all local — upscale, denoise, artifact removal, face restore,
+  sharpen — with live A/B compare and non-destructive sidecars.
+- 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
+  your Mac.
+- 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
+- 🚫 **Zero runtime network calls.** The only thing that touches the network is a setup script you
+  run yourself, once, to fetch model weights.
+
+---
+
+## Quick start
 
 ```bash
 swift build
-swift run pv-pipeline                  # run the verifier
-swift run Latent                       # launch the viewer from the package binary
+swift run pv-pipeline      # self-verifier — confirms the pipeline works
+swift run Latent           # launch the viewer
+```
 
-# Build a real .app bundle:
+Or build a real `.app`:
+
+```bash
 swift scripts/generate_icon.swift      # render the app icon (one-time)
 ./scripts/build_app.sh
 open build/Latent.app
 ```
 
-### Opening folders
+**You do not need model weights to run Latent.** With `Resources/Models/` empty, every stage still
+works: Sharpen runs classically, Upscale falls back to Lanczos, and the model-backed stages pass
+through untouched. Clone, build, browse — that's it.
 
-- **Drag a folder onto `Latent.app`** (Dock icon or Finder icon) — opens it.
-- **Terminal:** `open -a Latent /path/to/folder`
-- **From inside Latent:** Cmd-O / "Open Folder…"
-- **Right-click an *image* in Finder → Open With → Latent** — opens the
-  parent folder and selects that image. Works because `public.jpeg` etc.
-  are registered. **Folders themselves don't show "Open With" in the
-  standard Finder context menu — that's an Apple OS-level restriction**,
-  not something `Info.plist` alone can fix. The drag-drop and
-  command-line paths above are the workarounds; a proper "Open in
-  Latent" Finder extension would need a separate Xcode-only target.
-
-Expected output (abbreviated):
-
-```
-photo-viewer pipeline runner / verifier
-=======================================
-
-  PASS  cold run executes all stages, no cache hits
-  PASS  warm run hits cache for all stages
-  PASS  disabling a stage skips it; upstream stays cached
-  PASS  distinct inputs occupy independent cache entries
-  PASS  sidecar round-trip preserves stage parameters
-  PASS  sidecar load rejects newer schema versions
-  PASS  LRU eviction drops least-recently-used entry
-  PASS  image I/O round-trips a JPEG through reader+writer
-  PASS  reader bakes EXIF orientation into pixels (axes swap for orientation 6)
-  PASS  writer with preserveMetadata=false strips EXIF
-  PASS  TileExecutor single-tile fast path is exact identity
-  PASS  TileExecutor multi-tile identity reproduces input within Float16 tolerance
-  PASS  TileExecutor 2x upscale produces correct output dimensions
-  ...
-
-All checks passed.
-```
-
-## Tests
-
-The `Tests/PipelineCoreTests/` target is XCTest-based and **requires Xcode** (not just CommandLineTools). Once Xcode is installed:
+To enable the AI stages (one-time, ~1.2 GB, needs Python with `coremltools`):
 
 ```bash
-sudo xcode-select -s /Applications/Xcode.app
-swift test
+pip install -r scripts/requirements.txt
+./scripts/setup_models.sh
 ```
 
-Until then, the `pv-pipeline` CLI exercises the same scenarios with `assert()` semantics — see `Sources/PipelineCLI/main.swift`.
+> **Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) first.** The five models come from five
+> upstream projects under four different licenses, and GFPGAN's has non-commercial carve-outs.
+
+### Opening folders
+
+- **Drag a folder onto `Latent.app`** — Dock or Finder icon.
+- **Terminal:** `open -a Latent /path/to/folder`
+- **In-app:** `⌘O`
+- **Right-click an *image* in Finder → Open With → Latent** — opens the parent folder and selects
+  that image.
+
+Folders themselves don't show "Open With" in Finder's context menu — that's an OS-level restriction,
+not something `Info.plist` can fix. The drag and command-line paths above are the workarounds.
+
+---
+
+## What it does
+
+**Browsing.** Folder tree sidebar (collapsible, lazy, `⌘L`), thumbnail grid with colour labels and
+pick/reject state, non-recursive by default with an opt-in **Include Subfolders**, sort by name or
+recently-modified, live filesystem watching, and predictive prefetch so the next image is already
+decoded.
+
+**Culling.** The vim keymap is the point: `j`/`k` to move, `gg`/`G` for ends, `m`+letter to set a
+mark and `'`+letter to jump back, digits for colour labels, `⇧P` to pick, one-click trash with `⌘Z`
+undo, and bulk select for batch operations.
+
+**Viewing.** Synced zoom and pan (0.25–16×, drag to pan, pinch to zoom, double-tap to cycle
+2×→3×→4×→1×), animated GIFs, video playback, and a map view built from EXIF GPS.
+
+**Enhancing.** Per-stage toggles and sliders with live preview, A/B compare (enhanced / original /
+side-by-side, hold `B` to blink), and `.enhance.json` sidecars so your edits are non-destructive and
+diffable.
+
+**Searching.** Index a folder once, then query it by image similarity or by typed description.
+Embeddings are OpenCLIP ViT-B/32, 512-dimensional, persisted per folder and staleness-aware.
+
+---
+
+## The enhancement pipeline
+
+Five stages, each independently toggleable, each degrading gracefully when its model isn't
+installed:
+
+| Stage | Model | Without the model |
+|---|---|---|
+| **Artifact removal** | FBCNN | passes through |
+| **Denoise** | NAFNet | passes through |
+| **Face restore** | GFPGAN v1.4 | passes through |
+| **Upscale** | Real-ESRGAN x2 | Lanczos resize |
+| **Sharpen** | *none — Core Image* | always works |
+
+Face restore uses Apple's Vision framework to detect faces, crops each one, runs the model, and
+alpha-composites it back with a feathered edge — so an image with no detectable faces costs nothing.
+
+**The cache is the clever part.** Each stage's output is keyed on the input hash *plus* the ordered
+list of `(stageID, paramsHash)` for every enabled prior stage. Toggle a stage off and upstream cache
+hits still apply; only the downstream is recomputed. Eviction is LRU and byte-bounded rather than
+entry-bounded, because a 50 MP enhanced image is roughly 1500× the size of a thumbnail.
+
+Large images are processed in tiles with feathered seam blending, so memory stays bounded on 50 MP+
+files.
+
+---
+
+## Requirements
+
+- macOS 14 or newer to run.
+- **A recent macOS SDK to build.** The code uses APIs that are not present in older SDKs; CI builds
+  against macOS 15. If you are on an older Xcode you may hit compile errors in the CoreGraphics and
+  CoreML bridges.
+- Full Xcode (not just CommandLineTools) for `swift test`. `swift run pv-pipeline` runs anywhere and
+  covers the same scenarios.
+
+---
+
+## Verifying a change
+
+```bash
+swift build
+swift run pv-pipeline      # assert-based, no Xcode and no models needed
+swift test                 # XCTest target, 30 tests, needs Xcode
+```
+
+`pv-pipeline` exercises cache behaviour, sidecar round-trips, image I/O and EXIF orientation,
+tiling, search primitives, vim state, GPS extraction, Quick Look, and archive extraction.
+
+---
 
 ## Project layout
 
 ```
 latent/
-├── Package.swift
 ├── Sources/
-│   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage/CVPixelBuffer bridges
-│   ├── EnhancementStages/     # The 5 stages, all wired
-│   ├── PhotoIO/               # ImageReader / ImageWriter / ImageMetadata
-│   ├── PhotoML/               # TileExecutor / CoreMLImageModel / ModelRegistry / ModelManager / FaceDetector / FaceComposite
-│   ├── PhotoSearch/           # EmbeddingVector / EmbeddingIndex / CLIP image+text encoders / SearchEngine
-│   ├── PipelineCLI/           # `pv-pipeline` runner + self-verifier
-│   ├── PhotoQuickLook/        # QuickLookRenderer (consumed by future QL extension target)
-│   └── PhotoViewerApp/        # SwiftUI viewer (folder browse, vim keymap, map view, in-app pipeline UI, A/B compare)
-├── Resources/
-│   └── Models/                # .mlpackage files land here (gitignored)
-├── scripts/
-│   ├── convert_realesrgan.py  # Upscale: Real-ESRGAN x2
-│   ├── convert_nafnet.py      # Denoise: NAFNet-SIDD
-│   ├── convert_fbcnn.py       # Artifact removal: FBCNN
-│   ├── convert_gfpgan.py      # Face restore: GFPGAN v1.4
-│   ├── convert_openclip.py    # Search: OpenCLIP ViT-B/32 (image + text encoders)
-│   ├── build_app.sh           # Package PhotoViewerApp as a real .app bundle
-│   └── requirements.txt
-├── Resources/AppBundle/
-│   └── Info.plist             # Document types, bundle ID, etc. for the .app bundle
-└── Tests/
-    └── PipelineCoreTests/     # XCTest target (needs Xcode)
+│   ├── PipelineCore/          Stage protocol, chain executor, cache, sidecar, ImageBuffer
+│   ├── EnhancementStages/     the five stages
+│   ├── PhotoIO/               reader/writer, EXIF round-trip, colour-space handling
+│   ├── PhotoML/               tiling, CoreML wrappers, model registry, face detect/composite
+│   ├── PhotoSearch/           embeddings, per-folder index, CLIP encoders, BPE tokenizer
+│   ├── PhotoViewerApp/        the SwiftUI app
+│   ├── PhotoQuickLook/        QuickLookRenderer
+│   └── PipelineCLI/           pv-pipeline
+├── Resources/Models/          .mlpackage files land here (gitignored)
+├── scripts/                   model conversion + app packaging
+└── Tests/                     XCTest target
 ```
 
-## Architectural decisions
+> **On naming:** the SwiftPM package and most modules are still `PhotoViewer` / `Photo*` from before
+> the project was named Latent. Only the executable and app are `Latent`. Renaming the modules would
+> be a large diff for no functional gain, so it hasn't been done.
 
-**Why a chain, not a full DAG?** The enhancement pipeline is linear — every stage feeds the next. The "DAG" framing is for the cache: each stage's output is keyed on `(inputHash, ordered list of (stageID, paramsHash) for enabled prior stages)`. Toggle a stage off and upstream cache hits still apply; downstream is recomputed once with the new path. Branching/joining (e.g., for ensemble enhancement) can be added later behind the same protocol.
+---
 
-**Why `actor IntermediateCache`?** Multiple pipeline runs from different windows/tabs share a process-wide cache. An actor serializes access without locks. LRU eviction is byte-bounded (not entry-count-bounded) because a 50MP enhanced image is ~1500x bigger than a 256x256 thumbnail.
+## Design notes
 
-**Why is `Params` per-stage Codable + hashable?** The same parameter struct serves three masters:
+<details>
+<summary><strong>Why a chain, not a full DAG?</strong></summary><br>
+
+The enhancement pipeline is linear — every stage feeds the next. The "DAG" framing is for the cache:
+each stage's output is keyed on `(inputHash, ordered list of (stageID, paramsHash) for enabled prior
+stages)`. Toggle a stage off and upstream cache hits still apply; downstream is recomputed once with
+the new path. Branching/joining (e.g. for ensemble enhancement) can be added later behind the same
+protocol.
+</details>
+
+<details>
+<summary><strong>Why <code>actor IntermediateCache</code>?</strong></summary><br>
+
+Multiple pipeline runs from different windows share a process-wide cache. An actor serializes access
+without locks. LRU eviction is byte-bounded (not entry-count-bounded) because a 50 MP enhanced image
+is ~1500× bigger than a 256×256 thumbnail.
+</details>
+
+<details>
+<summary><strong>Why are stage <code>Params</code> Codable *and* hashable?</strong></summary><br>
+
+The same parameter struct serves three masters:
+
 1. **Hashing** for in-memory cache keys (the `stableHash` extension)
 2. **Codable** for sidecar persistence (`ParameterBag` JSON-encodes whatever the stage holds)
 3. **Sendable** for concurrent execution
+</details>
 
-**Why not bundle CoreML now?** Two reasons. First, CoreML model conversion (PyTorch → ONNX → CoreML) is a separate workstream that needs the actual model weights from Hugging Face plus `coremltools` in a Python env. Second, getting the pipeline plumbing right is independent of the inference implementation — when we plug in real ML, only `process()` bodies change, not the protocol or the executor.
+<details>
+<summary><strong>Why JSON sidecars instead of a binary format?</strong></summary><br>
 
-**Sidecar format choice (`.enhance.json` vs binary).** JSON for diffability and forward-compat. `ParameterBag` stores stage parameters as embedded JSON values, so unknown stages from a future version round-trip without losing data when read by an older app.
+Diffability and forward-compatibility. `ParameterBag` stores stage parameters as embedded JSON
+values, so unknown stages from a future version round-trip without losing data when read by an older
+app.
+</details>
 
-## Next milestones
+<details>
+<summary><strong>Why orientation is baked into pixels</strong></summary><br>
 
-In order of dependency:
+The reader produces canonical-up pixels, so no stage downstream has to reason about EXIF
+orientation. It is the kind of thing that is cheap to do once at the boundary and expensive to
+forget in five places.
+</details>
 
-1. ~~**Image I/O module**~~ — done. CGImageSource/CGImageDestination based reader and writer, EXIF preserved with orientation baking. CVPixelBuffer-backed `ImageBuffer` deferred until the CoreML wiring needs it.
+---
 
-2. ~~**Real-ESRGAN x2**~~ + ~~remaining 4 stages~~ — done. Run any of the `scripts/convert_*.py` to populate models. Without them, stages gracefully degrade (Sharpen still works classically, Upscale falls back to Lanczos, others pass through).
-3. ~~**Search infrastructure**~~ — done for image-image. Text-query needs the BPE tokenizer port (next).
-4. ~~**SwiftUI app shell**~~ — minimal version done; folder picker, thumbnail grid, detail view, arrow nav.
+## Status and limits
 
-5. ~~**CLIP BPE tokenizer in Swift**~~ — done. `CLIPBPETokenizer` ports `simple_tokenizer.py`. Run `convert_openclip.py` to populate the merges file.
-6. ~~**SwiftUI app polish**~~ (most) — done. Vim keymap, keybind cheatsheet, A/B compare, synced zoom/pan, map view, in-app pipeline UI all wired. Remaining: status-bar progress and a Metal-backed renderer for proper HDR/wide-gamut display.
-7. **Migrate to Xcode project** (1-2 weeks) — proper bundle (today the `build_app.sh` script gets close, but Xcode handles code signing, sandbox entitlements, app icon, App Store packaging, and notarization). Adding the Quick Look extension target lives in this milestone — `PhotoQuickLook.QuickLookRenderer` is already shipped and ready to import.
-8. **System integration** (2-3 weeks) — Quick Look extension target (built atop `PhotoQuickLook`), drag in/out from Finder, default-app registration ranking (today: `LSHandlerRank=Alternate`).
-9. **Polish + beta** (4-6 weeks) — perf tuning on real 50MP+ images, lazy-download flow for models, App Store submission.
+Latent is pre-1.0. It is a working app, not a shipped product:
 
-Most of the original 5-7 month plan got front-loaded into this scaffold. Remaining work is largely Xcode/App-Store packaging plus UI polish.
+- Packaging is SwiftPM plus a script. `scripts/build_app.sh` produces a usable `.app`, but code
+  signing, sandbox entitlements, notarization, and App Store packaging need a proper Xcode project.
+- The Quick Look extension target isn't built yet — `PhotoQuickLook.QuickLookRenderer` is written
+  and ready for it.
+- Display is not yet Metal-backed, so HDR and wide-gamut rendering aren't what they could be.
+- Text search requires the converted OpenCLIP assets; image-to-image similarity does too.
+
+---
 
 ## License
 

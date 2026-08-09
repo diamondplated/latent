@@ -122,7 +122,8 @@ struct EmptyStateView: View {
         }
     }
 
-    /// "~/Desktop" rather than "/Users/andrew/Desktop" for the subtitle.
+    /// Abbreviate the home directory, so the subtitle reads "~/Desktop"
+    /// rather than the full "/Users/<you>/Desktop".
     private func prettyScreenshotsLocation() -> String {
         let path = AppState.screenshotsFolderURL.path
         let home = NSHomeDirectory()
