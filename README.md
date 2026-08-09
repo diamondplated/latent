@@ -1,6 +1,14 @@
 # Latent
 
+[![CI](https://github.com/diamondplated/latent/actions/workflows/ci.yml/badge.svg)](https://github.com/diamondplated/latent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A Mac-native photo viewer focused on speed, folder-based browsing, and best-in-class **local** AI enhancement. No cloud calls, no library import, no subscription.
+
+Everything runs on your machine. The only time Latent needs the network is the one-off script that
+downloads model weights, which you run yourself — see [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md)
+for what those models are and how they are licensed. **You can clone, build, and run without any of
+them**: stages without a model fall back to a classical implementation or pass through untouched.
 
 ## Status
 
@@ -97,7 +105,7 @@ Until then, the `pv-pipeline` CLI exercises the same scenarios with `assert()` s
 ## Project layout
 
 ```
-photo-viewer/
+latent/
 ├── Package.swift
 ├── Sources/
 │   ├── PipelineCore/          # Stage protocol, Pipeline executor, Cache, Sidecar, ImageBuffer, CGImage/CVPixelBuffer bridges
@@ -159,4 +167,15 @@ Most of the original 5-7 month plan got front-loaded into this scaffold. Remaini
 
 ## License
 
-TBD.
+[MIT](LICENSE) for Latent's own code.
+
+Latent ships **no model weights** — `Resources/Models/` is gitignored and the conversion scripts
+download from upstream at your initiative. Those weights carry their own terms, and they are not all
+permissive: GFPGAN's license has non-commercial carve-outs (StyleGAN2 under NVIDIA's license, DFDNet
+under CC BY-NC-SA 4.0). Read [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) before shipping anything
+commercial built on the FaceRestore stage. Every other stage's model is permissively licensed.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). `swift run pv-pipeline` is the fastest way to confirm a
+change didn't break the pipeline; it needs no models and no Xcode.

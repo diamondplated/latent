@@ -16,9 +16,13 @@ xcuserdata/
 *.dSYM.zip
 *.dSYM
 
-# Local model cache (downloaded on first enhance, not in repo)
-Resources/Models/*.mlpackage
-Resources/Models/*.mlmodelc
+# Locally converted model + tokenizer assets. Downloaded and converted by
+# scripts/convert_*.py at the user's initiative; never redistributed here.
+# See THIRD_PARTY_MODELS.md for what these are and how they are licensed.
+Resources/Models/*
+!Resources/Models/.gitkeep
+Resources/Tokenizer/*
+!Resources/Tokenizer/.gitkeep
 
 # Conversion-script artifacts
 scripts/weights/

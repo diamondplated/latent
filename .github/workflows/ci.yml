@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and self-verify
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build
+        run: swift build
+
+      # The pv-pipeline runner asserts the same scenarios as the XCTest target but
+      # runs anywhere, including on a CommandLineTools-only machine. It covers cache
+      # behaviour, sidecars, image I/O, tiling, search primitives, vim state, GPS,
+      # Quick Look and archive extraction. No model weights required — the stages
+      # degrade to identity or a classical fallback when a model is absent.
+      - name: Run the self-verifier
+        run: swift run pv-pipeline
+
+      - name: XCTest target
+        run: swift test
