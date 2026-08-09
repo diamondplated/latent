@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import PhotoIO
+import PhotoViewerCore
 
 /// Holds the currently-selected folder and the list of image URLs in it.
 /// Watches the folder for changes via DispatchSource so adds/removes update
@@ -56,6 +57,11 @@ final class AppState {
     /// Owned here so trashImage / closeFolder can poke it. The prefetch
     /// window is updated by BrowserView when selectedIndex changes.
     let prefetcher = ImagePrefetcher(capacity: 5)
+    /// Vim keymap state: marks, colour labels, picks, rejects. Lives here
+    /// rather than on BrowserView because the keyboard is no longer the only
+    /// input device — the phone companion dispatches the same `VimAction`
+    /// values through `dispatch(_:)`. One owner, one writer.
+    var vimKeymap = VimKeymap()
 
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
@@ -528,6 +534,31 @@ final class AppState {
     func selectFirst() { selection.selectFirst() }
     func selectLast() { selection.selectLast() }
     func select(url: URL) { selection.select(url: url) }
+
+    // MARK: - Vim action dispatch
+
+    /// Apply one `VimAction`, whatever produced it. The keyboard produces
+    /// these via `VimKeymap.handle`; the phone companion produces them from
+    /// swipe gestures. Both land here, so picks, rejects, labels and the
+    /// sidecar write happen in exactly one place.
+    ///
+    /// `VimKeymap` has already mutated its own state for the label/pick/
+    /// reject/mark cases by the time we see the action — this method's job is
+    /// navigation plus persistence.
+    func dispatch(_ action: VimAction) {
+        switch action {
+        case .next:  selectNext()
+        case .prev:  selectPrevious()
+        case .first: selectFirst()
+        case .last:  selectLast()
+        case .jumpToMark(let c):
+            if let url = vimKeymap.marks[c] { select(url: url) }
+        case .setMark, .setColorLabel, .togglePick, .toggleReject:
+            if let folder { vimKeymap.saveInBackground(folder: folder) }
+        case .none:
+            break
+        }
+    }
 
     func stopWatching() {
         fileWatcher?.cancel()
