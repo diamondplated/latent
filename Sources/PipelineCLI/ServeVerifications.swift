@@ -48,6 +48,34 @@ func httpExpectedLengthDetectsIncompleteRequest() async throws {
                 "a complete request must report its own byte count")
 }
 
+func httpRefusesHostileContentLength() async throws {
+    // Content-Length arrives from an unauthenticated peer and feeds both the
+    // `headerBytes + contentLength` arithmetic in expectedLength(of:) and the
+    // body slicing in init(parsing:). A 64-byte request must be refused, not
+    // trap the process — an arithmetic overflow here takes the whole app down.
+    let hostile = [
+        "9223372036854775807",   // Int.max: header bytes + this overflows
+        "-1",                    // negative
+        "99999999",              // far past maxRequestBytes
+        "abc",                   // not a number at all
+    ]
+    for value in hostile {
+        let raw = Data("POST /api/pair HTTP/1.1\r\nContent-Length: \(value)\r\n\r\n".utf8)
+        try require(HTTPRequest.expectedLength(of: raw) == nil,
+                    "expectedLength must refuse Content-Length: \(value)")
+        try require(HTTPRequest(parsing: raw) == nil,
+                    "init(parsing:) must refuse Content-Length: \(value)")
+    }
+
+    // Conflicting duplicates are a smuggling primitive: the two functions
+    // must never disagree about which value wins.
+    let conflicting = Data("POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc".utf8)
+    try require(HTTPRequest.expectedLength(of: conflicting) == nil,
+                "expectedLength must refuse conflicting Content-Length headers")
+    try require(HTTPRequest(parsing: conflicting) == nil,
+                "init(parsing:) must refuse conflicting Content-Length headers")
+}
+
 func httpParsesFromNonZeroStartIndexSlice() async throws {
     // `headerTerminator` matches against `[UInt8](buffer)`, which is always
     // 0-based, while `buffer` itself may not be (a `Data` slice keeps its

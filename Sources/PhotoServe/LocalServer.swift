@@ -8,14 +8,17 @@ import Network
 /// is ephemeral because it is carried in the QR anyway, which sidesteps
 /// collisions with whatever else the machine is running.
 public actor LocalServer {
-    /// A connection that has neither completed a request nor been answered by
-    /// then is abandoned. Without this, a peer that opens a socket and sends
-    /// nothing keeps its `NWConnection` — and the receive handler that
-    /// retains it — alive until the whole server stops.
-    static let connectionDeadline: Duration = .seconds(30)
+    /// How long a peer gets to finish sending a request. Without this, a peer
+    /// that opens a socket and sends nothing keeps its `NWConnection` — and
+    /// the receive handler that retains it — alive until the whole server
+    /// stops. It deliberately covers the read phase only: once a complete
+    /// request has been handed to the router the remaining delay is ours, and
+    /// a human taking a minute over the pairing prompt is not a stalled peer.
+    static let readDeadline: Duration = .seconds(30)
 
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var readDeadlines: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var router: Router?
 
     public init() {}
@@ -30,8 +33,8 @@ public actor LocalServer {
 
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        // No point accepting a connection that arrives over a cellular or
-        // VPN path — this is a LAN feature.
+        // No point accepting a connection that arrives over a cellular path —
+        // this is a LAN feature.
         params.prohibitedInterfaceTypes = [.cellular]
 
         let listener = try NWListener(using: params)
@@ -51,6 +54,12 @@ public actor LocalServer {
                 case .failed(let error):
                     guard resumed.claim() else { return }
                     continuation.resume(throwing: error)
+                case .cancelled:
+                    // A `stop()` that lands before `.ready` does. Without this
+                    // the continuation is never resumed and the caller hangs
+                    // forever on a listener that no longer exists.
+                    guard resumed.claim() else { return }
+                    continuation.resume(throwing: CancellationError())
                 default:
                     break
                 }
@@ -68,17 +77,31 @@ public actor LocalServer {
         listener = nil
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
+        for (_, t) in readDeadlines { t.cancel() }
+        readDeadlines.removeAll()
         router = nil
     }
 
     private func accept(_ connection: NWConnection) {
-        connections[ObjectIdentifier(connection)] = connection
+        let key = ObjectIdentifier(connection)
+        connections[key] = connection
         connection.start(queue: .global(qos: .userInitiated))
         readRequest(on: connection, buffer: Data())
-        Task { [weak self] in
-            try? await Task.sleep(for: Self.connectionDeadline)
+        readDeadlines[key] = Task { [weak self] in
+            try? await Task.sleep(for: Self.readDeadline)
+            guard !Task.isCancelled else { return }
             await self?.close(connection)
         }
+    }
+
+    /// The peer has sent everything it owes us. Any further delay is the
+    /// app's — a human deciding on a pairing, a preview being rendered — and
+    /// reaping the connection under it would drop a reply the app is about to
+    /// produce. For pairing that is not merely a lost response: the device is
+    /// registered but its token never arrives, leaving a paired phone that
+    /// cannot authenticate.
+    private func clearReadDeadline(for connection: NWConnection) {
+        readDeadlines.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
     }
 
     private func readRequest(on connection: NWConnection, buffer: Data) {
@@ -112,6 +135,7 @@ public actor LocalServer {
                     await self.send(.status(400), on: connection)
                     return
                 }
+                await self.clearReadDeadline(for: connection)
                 let host = Self.remoteHost(of: connection)
                 guard let router = await self.router else {
                     await self.send(.status(404), on: connection)
@@ -132,6 +156,7 @@ public actor LocalServer {
     private func close(_ connection: NWConnection) {
         connection.cancel()
         connections.removeValue(forKey: ObjectIdentifier(connection))
+        clearReadDeadline(for: connection)
     }
 
     /// Peer address as a bare string, for `AddressGate`.

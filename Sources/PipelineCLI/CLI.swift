@@ -65,6 +65,7 @@ struct PipelineCLI {
         failures += await runVerification("HTTPRequest: reads body per Content-Length", check: httpParsesBodyByContentLength)
         failures += await runVerification("HTTPRequest: rejects malformed requests", check: httpRejectsMalformedRequests)
         failures += await runVerification("HTTPRequest: expectedLength reports nil until the body is complete", check: httpExpectedLengthDetectsIncompleteRequest)
+        failures += await runVerification("HTTPRequest: refuses overflowing, negative and conflicting Content-Length", check: httpRefusesHostileContentLength)
         failures += await runVerification("HTTPResponse: serializes status line, headers and body", check: httpResponseSerializesStatusAndBody)
         failures += await runVerification("AddressGate: accepts loopback, RFC1918, link-local and ULA", check: addressGateAcceptsPrivateRanges)
         failures += await runVerification("AddressGate: refuses public and malformed addresses", check: addressGateRejectsPublicAddresses)

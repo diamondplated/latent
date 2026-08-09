@@ -30,19 +30,36 @@ public struct HTTPRequest: Sendable, Equatable {
         guard let headerEnd = headerTerminator(in: buffer) else { return nil }
         let headerBytes = (headerEnd - buffer.startIndex) + 4
         let head = String(decoding: buffer[..<headerEnd], as: UTF8.self)
-        let contentLength = head
-            .split(separator: "\r\n")
-            .dropFirst()
-            .compactMap { line -> Int? in
-                let parts = line.split(separator: ":", maxSplits: 1)
-                guard parts.count == 2,
-                      parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length"
-                else { return nil }
-                return Int(parts[1].trimmingCharacters(in: .whitespaces))
-            }
-            .first ?? 0
+        let lines = Array(head.split(separator: "\r\n").dropFirst())
+        guard let contentLength = declaredBodyLength(headerLines: lines) else { return nil }
         let total = headerBytes + contentLength
         return buffer.count >= total ? total : nil
+    }
+
+    /// The declared body length: 0 when the header is absent, `nil` when it
+    /// is present but not a length this server will accept.
+    ///
+    /// Content-Length arrives from the peer before any authentication and
+    /// feeds both the arithmetic here and the slicing in `init(parsing:)`, so
+    /// it is validated in exactly one place rather than at each use. Clamping
+    /// to `maxRequestBytes` is what keeps `headerBytes + contentLength` from
+    /// overflowing — a body larger than the cap could never be parsed anyway,
+    /// so refusing it here costs nothing and removes the trap by
+    /// construction. Conflicting duplicate headers are refused per RFC 9112
+    /// §6.3; letting the two functions disagree about which one wins is a
+    /// request-smuggling primitive.
+    static func declaredBodyLength(headerLines: [Substring]) -> Int? {
+        let values = headerLines.compactMap { line -> String? in
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length"
+            else { return nil }
+            return parts[1].trimmingCharacters(in: .whitespaces)
+        }
+        guard let declared = values.first else { return 0 }
+        guard values.allSatisfy({ $0 == declared }) else { return nil }
+        guard let length = Int(declared), (0...maxRequestBytes).contains(length) else { return nil }
+        return length
     }
 
     public init?(parsing buffer: Data) {
@@ -75,8 +92,8 @@ public struct HTTPRequest: Sendable, Equatable {
         }
         self.headers = headers
 
+        guard let declared = Self.declaredBodyLength(headerLines: lines) else { return nil }
         let bodyStart = headerEnd + 4
-        let declared = Int(headers["content-length"] ?? "") ?? 0
         let available = buffer.endIndex - bodyStart
         self.body = declared > 0 ? buffer[bodyStart..<(bodyStart + min(declared, available))] : Data()
     }
