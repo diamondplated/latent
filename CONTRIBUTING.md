@@ -1,8 +1,10 @@
 # Contributing to Latent
 
-Thanks for looking. Latent is a Mac-native photo viewer with a local enhancement pipeline. Nothing
-it does touches the network at runtime — that is a property worth protecting, so changes that would
-introduce a runtime network call need a good reason and a flag.
+Thanks for looking. Latent is a Mac-native photo viewer with a local enhancement pipeline. Out of
+the box nothing it does touches the network — the exceptions are the map view's MapKit tiles and the
+phone companion, which is off until you switch it on and never leaves your LAN. That default is
+worth protecting, so a change that would introduce a runtime network call needs a good reason and an
+off-by-default flag.
 
 ## Getting set up
 
@@ -69,7 +71,8 @@ modules would be a large diff for no functional gain, so it has not been done.
 - **`preserveMetadata: false`** on export. Stripping EXIF is a privacy feature, not an oversight.
 - **Graceful model degradation.** A missing model must never be an error. Someone should be able to
   clone, build, and run without downloading a gigabyte.
-- **No runtime network calls.** Model download is an explicit, separate, user-run script.
+- **No runtime network calls by default.** Model download is an explicit, separate, user-run script.
+  The phone companion is the one runtime listener, and it only exists while switched on.
 
 ## Reporting bugs
 

@@ -13,16 +13,26 @@ share — format, rough dimensions, and where it came from is usually enough to 
 A local, single-user Mac app that reads image files from folders you point it at. There is no
 account, no sync, no server, and no telemetry.
 
-**No runtime network calls.** The running app does not contact anything. The only network access in
-this project is `scripts/convert_*.py`, which you run yourself, once, to download model weights. If
-you never run those scripts, Latent never touches the network — and it still works, because every
-model-backed stage degrades to a classical fallback or a pass-through.
+**No runtime network calls by default.** Out of the box the running app does not contact anything.
+Three things can touch the network, and all three are things you ask for:
+
+- `scripts/convert_*.py`, which you run yourself, once, to download model weights. If you never run
+  them Latent still works, because every model-backed stage degrades to a classical fallback or a
+  pass-through.
+- The map view, which is MapKit and fetches its tiles from Apple while it is open.
+- The phone companion, which is off until you switch it on, serves only your local network, and
+  stops when you quit. See the README for its pairing and trust model.
 
 ## The properties that are meant to hold
 
-- **No network at runtime.** A change that introduces a runtime fetch — update check, telemetry,
-  remote model pull — breaks the core promise of the app and needs to be behind an explicit,
-  off-by-default flag.
+- **No network at runtime unless the user turned it on.** A change that introduces a runtime fetch —
+  update check, telemetry, remote model pull — breaks the core promise of the app. The only
+  acceptable shape is the one the phone companion uses: off by default, switched on deliberately,
+  scoped as narrowly as the feature allows, and documented plainly.
+- **The phone companion stays on the local network.** Connections from outside a private address
+  range are refused, there is no relay and no account, and traffic is unencrypted — so a change that
+  would route it through a remote service, or that weakens the address gate or the one-time pairing,
+  is a change to the app's core promise and not a routine one.
 - **Deletion is recoverable.** Trashing uses `FileManager.trashItem`, so files go to the Finder
   Trash and can be restored. Nothing in the culling flow permanently deletes a photo.
 - **Export can strip metadata.** `preserveMetadata: false` removes EXIF on write. That is a privacy
