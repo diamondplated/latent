@@ -95,6 +95,10 @@ func addressGateAcceptsPrivateRanges() async throws {
         "172.16.0.1", "172.31.255.254",
         "192.168.1.20", "169.254.10.1",
         "::1", "fe80::1c2b:3d4e", "fd00::42",
+        // IPv4-mapped IPv6, the form a dual-stack listener presents an
+        // IPv4 peer in (Darwin included) — Task 5 stands up exactly this.
+        "::ffff:192.168.1.20", "::ffff:127.0.0.1",
+        "::FFFF:10.0.0.1",   // mixed-case prefix must match too
     ]
     for host in allowed {
         try require(AddressGate.isPrivate(host), "\(host) should be treated as LAN-local")
@@ -106,6 +110,8 @@ func addressGateRejectsPublicAddresses() async throws {
         "8.8.8.8", "1.1.1.1", "172.32.0.1", "172.15.255.255",
         "192.169.0.1", "203.0.113.7", "2606:4700::1111",
         "", "not-an-address", "999.999.999.999",
+        "::ffff:8.8.8.8", "::FFFF:1.1.1.1",  // mapped prefix must not launder public addresses
+        "+127.0.0.1",                        // leading '+' is not a real octet
     ]
     for host in denied {
         try require(!AddressGate.isPrivate(host), "\(host) must be refused")

@@ -19,7 +19,10 @@ public enum AddressGate {
         guard parts.count == 4 else { return false }
         var octets: [Int] = []
         for p in parts {
-            guard let v = Int(p), (0...255).contains(v), !p.isEmpty else { return false }
+            // Int("+1") parses fine but "+127.0.0.1" is not a real octet string;
+            // require plain digits before converting.
+            guard !p.isEmpty, p.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let v = Int(p), (0...255).contains(v) else { return false }
             octets.append(v)
         }
         switch (octets[0], octets[1]) {
@@ -34,6 +37,12 @@ public enum AddressGate {
 
     static func isPrivateIPv6(_ s: String) -> Bool {
         let lower = s.lowercased()
+        // Dual-stack listeners (Darwin included) present IPv4 peers as
+        // ::ffff:a.b.c.d. Strip the mapped prefix and re-dispatch to the
+        // IPv4 check rather than duplicating the range logic here.
+        if lower.hasPrefix("::ffff:") {
+            return isPrivateIPv4(String(lower.dropFirst("::ffff:".count)))
+        }
         if lower == "::1" { return true }                       // loopback
         if lower.hasPrefix("fe8") || lower.hasPrefix("fe9")
             || lower.hasPrefix("fea") || lower.hasPrefix("feb") { return true }  // fe80::/10
