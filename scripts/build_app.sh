@@ -60,7 +60,19 @@ for resource_dir in Models Tokenizer; do
     fi
 done
 
-# 5. Touch the bundle so Launch Services re-reads it. Without this, Finder
+# 5. Seal the bundle. SwiftPM ad-hoc signs the executable at link time, but
+#    nothing signs the *bundle*, so there is no _CodeSignature/CodeResources
+#    and `codesign --verify` fails with "code has no resources but signature
+#    indicates they must be present". On Apple silicon that can surface to a
+#    user as "the application is damaged". Must run last — after the Info.plist,
+#    icon and any model assets are in place, or the seal won't match.
+#    LATENT_SIGNING_IDENTITY can name a Developer ID for a distribution build;
+#    the default "-" is ad-hoc, which is what a local build wants.
+SIGNING_IDENTITY="${LATENT_SIGNING_IDENTITY:--}"
+codesign --force --deep --sign "$SIGNING_IDENTITY" --timestamp=none "$APP_DIR"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+
+# 6. Touch the bundle so Launch Services re-reads it. Without this, Finder
 #    sometimes serves a stale Info.plist from its cache and won't show the
 #    app in "Open With…".
 touch "$APP_DIR"
