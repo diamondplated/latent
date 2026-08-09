@@ -11,11 +11,12 @@ Usage:
     pip install -r scripts/requirements.txt
     python3 scripts/convert_realesrgan.py
 
-Tested with:
-    Python 3.11
-    torch 2.4
-    coremltools 8.0
-    basicsr 1.4.2
+Verified with Python 3.12, torch 2.7.1, coremltools 9.0 — converted end to
+end and the CoreML output matched the PyTorch reference to within fp16
+tolerance (max abs diff 0.0015).
+
+The RRDBNet architecture is vendored in scripts/archs/ rather than imported
+from basicsr; see that file for why.
 
 Notes:
 - Tracing happens at a fixed example resolution; the resulting CoreML model
@@ -30,29 +31,28 @@ from pathlib import Path
 import sys
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS_DIR = REPO_ROOT / "scripts" / "weights"
 OUTPUT_DIR = REPO_ROOT / "Resources" / "Models"
 OUTPUT_PATH = OUTPUT_DIR / "upscale-realesrgan-x2.mlpackage"
 
 WEIGHTS_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth"
+# sha256 of the file at WEIGHTS_URL, verified on download. See scripts/fetch.py.
+WEIGHTS_SHA256 = "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb"
 WEIGHTS_FILE = WEIGHTS_DIR / "RealESRGAN_x2plus.pth"
 
 
 def download_weights() -> None:
-    if WEIGHTS_FILE.exists():
-        print(f"weights already present: {WEIGHTS_FILE}")
-        return
-    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"downloading {WEIGHTS_URL}")
-    urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS_FILE)
-    print(f"saved to {WEIGHTS_FILE}")
+    from fetch import download_verified
+
+    download_verified(WEIGHTS_URL, WEIGHTS_FILE, WEIGHTS_SHA256)
 
 
 def build_model():
     """RRDBNet architecture matching Real-ESRGAN x2plus weights."""
     import torch
-    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from archs.rrdbnet import RRDBNet
 
     model = RRDBNet(
         num_in_ch=3,

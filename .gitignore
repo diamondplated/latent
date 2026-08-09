@@ -29,6 +29,9 @@ scripts/weights/
 scripts/.venv-convert/
 scripts/fbcnn/
 scripts/GFPGAN/
+scripts/nafnet/
+scripts/__pycache__/
+scripts/archs/__pycache__/
 .venv-convert/
 
 # Test fixtures

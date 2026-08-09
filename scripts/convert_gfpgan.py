@@ -12,7 +12,7 @@ Usage:
     pip install -r scripts/requirements.txt
     python3 scripts/convert_gfpgan.py
 
-Tested with: Python 3.11, torch 2.4, coremltools 8.0.
+Tested with: Python 3.12, torch 2.7.1, coremltools 9.0.
 
 Notes:
 - GFPGAN operates on 512×512 face crops normalized to [-1, 1] (see Swift
@@ -30,6 +30,7 @@ import subprocess
 import sys
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS_DIR = REPO_ROOT / "scripts" / "weights"
 GFPGAN_REPO_DIR = REPO_ROOT / "scripts" / "GFPGAN"
@@ -37,6 +38,8 @@ OUTPUT_DIR = REPO_ROOT / "Resources" / "Models"
 OUTPUT_PATH = OUTPUT_DIR / "face-restore-gfpgan.mlpackage"
 
 WEIGHTS_URL = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+# sha256 of the file at WEIGHTS_URL, verified on download. See scripts/fetch.py.
+WEIGHTS_SHA256 = "e2cd4703ab14f4d01fd1383a8a8b266f9a5833dacee8e6a79d3bf21a1b6be5ad"
 WEIGHTS_FILE = WEIGHTS_DIR / "GFPGANv1.4.pth"
 GFPGAN_GIT = "https://github.com/TencentARC/GFPGAN.git"
 
@@ -49,11 +52,9 @@ def ensure_repo() -> None:
 
 
 def download_weights() -> None:
-    if WEIGHTS_FILE.exists():
-        return
-    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"downloading {WEIGHTS_URL}")
-    urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS_FILE)
+    from fetch import download_verified
+
+    download_verified(WEIGHTS_URL, WEIGHTS_FILE, WEIGHTS_SHA256)
 
 
 def build_model():

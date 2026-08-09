@@ -49,10 +49,20 @@ prefixes and then falls back to resolving the name on your `PATH`. That means it
 binary found on your `PATH` by name. That is your `PATH` and your machine, but if you keep untrusted
 directories on it, be aware.
 
-**Model weights are downloaded without checksum pinning.** The conversion scripts fetch from the
-upstream projects' GitHub release URLs over HTTPS, and do not verify a pinned hash of what comes
-back. You are trusting TLS and those upstream releases. If you need a stronger guarantee, download
-and verify the weights yourself and place the converted `.mlpackage` files in `Resources/Models/`.
+**Model weights are checksum-pinned.** Every conversion script that can download its own weights
+verifies them against a SHA256 recorded in the script before `torch.load` ever sees the file
+(`scripts/fetch.py`). A mismatch is fatal and there is no override — a cached file is re-verified
+rather than trusted, so a tampered or half-written download from an earlier run cannot survive.
+
+This matters more than it looks. The scripts call `torch.load(..., weights_only=True)`, which is the
+right mitigation, but CVE-2025-32434 was a bypass of exactly that flag in torch < 2.6.0. A pinned
+hash does not depend on which torch you happen to be running. `scripts/requirements.txt` also pins
+torch at a version past that CVE, and drops `basicsr` entirely — it was unimportable on any modern
+torch and carried an unpatched advisory of its own.
+
+The exception is NAFNet: upstream publishes no GitHub release, so there is no canonical artifact to
+pin. That script does not download anything. It requires you to place the checkpoint yourself and
+prints the SHA256 of what it is about to load.
 
 See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) for what each model is and how it's licensed —
 GFPGAN's terms in particular have non-commercial carve-outs.

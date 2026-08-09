@@ -14,7 +14,7 @@ Usage:
     pip install -r scripts/requirements.txt
     python3 scripts/convert_openclip.py
 
-Tested with: Python 3.11, torch 2.4, coremltools 8.0, open_clip_torch 2.24.
+Tested with: Python 3.12, torch 2.7.1, coremltools 9.0.
 
 Notes:
 - ViT-B/32 is the smallest "good" CLIP variant — 86M params, 224×224 input,

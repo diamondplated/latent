@@ -12,7 +12,7 @@ Usage:
     pip install -r scripts/requirements.txt
     python3 scripts/convert_fbcnn.py
 
-Tested with: Python 3.11, torch 2.4, coremltools 8.0.
+Tested with: Python 3.12, torch 2.7.1, coremltools 9.0.
 
 Notes:
 - FBCNN takes color JPEG as input, predicts both a denoised image AND a
@@ -28,6 +28,7 @@ import subprocess
 import sys
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS_DIR = REPO_ROOT / "scripts" / "weights"
 FBCNN_REPO_DIR = REPO_ROOT / "scripts" / "fbcnn"
@@ -35,6 +36,8 @@ OUTPUT_DIR = REPO_ROOT / "Resources" / "Models"
 OUTPUT_PATH = OUTPUT_DIR / "artifact-removal-fbcnn.mlpackage"
 
 WEIGHTS_URL = "https://github.com/jiaxi-jiang/FBCNN/releases/download/v1.0/fbcnn_color.pth"
+# sha256 of the file at WEIGHTS_URL, verified on download. See scripts/fetch.py.
+WEIGHTS_SHA256 = "8b0e4ef23d59cf7ac934a342cb31a17619e4fa4a0b3374a9d78c5174312387e8"
 WEIGHTS_FILE = WEIGHTS_DIR / "fbcnn_color.pth"
 FBCNN_GIT = "https://github.com/jiaxi-jiang/FBCNN.git"
 
@@ -47,11 +50,9 @@ def ensure_repo() -> None:
 
 
 def download_weights() -> None:
-    if WEIGHTS_FILE.exists():
-        return
-    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"downloading {WEIGHTS_URL}")
-    urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS_FILE)
+    from fetch import download_verified
+
+    download_verified(WEIGHTS_URL, WEIGHTS_FILE, WEIGHTS_SHA256)
 
 
 def build_model():

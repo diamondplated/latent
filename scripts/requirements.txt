@@ -1,9 +1,26 @@
-# Pinned to versions that are known to work with the conversion script.
-# coremltools 8.x supports macOS 14+ deployment target and FP16 compute precision.
-# basicsr provides the RRDBNet architecture used by Real-ESRGAN.
-
-torch==2.4.1
-coremltools==8.0
-basicsr==1.4.2
+# Conversion-only dependencies. None of this ships in the app — Latent itself
+# is pure Swift and loads the converted .mlpackage files.
+#
+# torch >= 2.6.0 is a security floor, not a preference. CVE-2025-32434 is a
+# bypass of `torch.load(weights_only=True)`, which is exactly what every
+# conversion script does to a .pth downloaded off the internet. 2.7.1 is the
+# newest version coremltools 9 is close to being tested against (it names
+# 2.7.0), so it clears the critical advisory without wandering far from
+# supported ground.
+torch==2.7.1
+coremltools==9.0
 open_clip_torch==2.24.0
 numpy<2.0
+
+# basicsr is deliberately NOT here. It was pulled in for two architecture
+# classes, and it:
+#   * imports torchvision.transforms.functional_tensor, which torchvision
+#     removed — so it cannot be imported on any torch new enough to carry the
+#     CVE-2025-32434 fix, and it is unmaintained so that will not change;
+#   * carries an unpatched advisory of its own;
+#   * never actually provided NAFNet at all (basicsr 1.4.2 has no
+#     nafnet_arch), so convert_nafnet.py could never have run;
+#   * dragged in torchvision, opencv, scipy and tensorboard for ~150 lines of
+#     nn.Module.
+# RRDBNet is vendored in scripts/archs/ (Apache-2.0, attributed) and NAFNet
+# comes from its own upstream repo, the way FBCNN already did.
