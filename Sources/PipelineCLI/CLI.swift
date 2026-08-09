@@ -10,6 +10,7 @@ import PhotoSearch
 import PhotoViewerCore
 import PhotoGeo
 import PhotoQuickLook
+import PhotoServe
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -60,6 +61,11 @@ struct PipelineCLI {
         failures += await runVerification("VimKeymap: save/load roundtrip preserves marks/labels/picks") {
             try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
         }
+        failures += await runVerification("HTTPRequest: parses request line, query and case-insensitive headers", check: httpParsesRequestLineAndHeaders)
+        failures += await runVerification("HTTPRequest: reads body per Content-Length", check: httpParsesBodyByContentLength)
+        failures += await runVerification("HTTPRequest: rejects malformed requests", check: httpRejectsMalformedRequests)
+        failures += await runVerification("HTTPRequest: expectedLength reports nil until the body is complete", check: httpExpectedLengthDetectsIncompleteRequest)
+        failures += await runVerification("HTTPResponse: serializes status line, headers and body", check: httpResponseSerializesStatusAndBody)
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
         failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)
         failures += await runVerification("QuickLookRenderer: rejects unsupported file extensions", check: quickLookRenderRejectsUnsupported)
