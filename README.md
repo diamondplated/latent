@@ -44,10 +44,13 @@ files stay exactly where they are, and everything the app can do runs on your ow
 - ✨ **Four-stage enhancement**, all local — upscale, denoise, artifact removal, sharpen — with
   live A/B compare and non-destructive sidecars.
 - 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
-  your Mac.
+  your Mac — though nothing in the app starts an indexing pass yet, so there is nothing to query
+  ([status](#status-and-limits)).
 - 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
-- 🚫 **Zero runtime network calls.** The only thing that touches the network is a setup script you
-  run yourself, once, to fetch model weights.
+- 🚫 **Zero runtime network calls by default.** Three things reach the network, each because you
+  asked for it: a setup script you run yourself, once, to fetch model weights; the map view, which
+  is MapKit and fetches its tiles from Apple while it is open; and the optional phone companion
+  below, which you switch on per session and which never leaves your LAN.
 
 ---
 
@@ -133,8 +136,32 @@ undo, and bulk select for batch operations.
 side-by-side, hold `B` to blink), and `.enhance.json` sidecars so your edits are non-destructive and
 diffable.
 
-**Searching.** Index a folder once, then query it by image similarity or by typed description.
-Embeddings are OpenCLIP ViT-B/32, 512-dimensional, persisted per folder and staleness-aware.
+**Searching.** Query a folder by image similarity or by typed description. Embeddings are OpenCLIP
+ViT-B/32, 512-dimensional, persisted per folder and staleness-aware. The indexing pass that fills
+that index has no trigger yet — see [Status and limits](#status-and-limits).
+
+---
+
+## Phone companion (optional, off by default)
+
+Browse and cull a folder from your phone, over your own network. Turn it on, scan the QR code on
+your Mac, and the phone becomes a second input device — swipe up to pick, down to reject, sideways
+to move, long press to set a colour label. Every gesture goes through the same code path a keystroke
+does and lands in the same per-folder sidecar, so the two screens never disagree.
+
+- **Off unless you turn it on.** No listener exists until you do, and it stops when you quit Latent.
+- **Your LAN only.** Connections from outside a private address range are refused. There is no
+  cloud relay and no account, and there is no plan to add one.
+- **One-time pairing.** The QR carries a code that works once and expires in a minute, and the Mac
+  asks you to approve the device before it gets a token. Revoke any device at any time.
+- **Only the folder you share.** The phone sees the folder you have open, not everything Latent has
+  ever opened.
+- **It cannot delete anything.** Picks, rejects, labels and navigation are the whole vocabulary.
+  Trashing stays on the Mac, where `⌘Z` can undo it.
+- **Unencrypted on your local network.** There is no TLS: a self-signed certificate on a LAN makes
+  the browser show a security warning on every launch, and training yourself to click through that
+  warning is worse than the plaintext it would hide. Turn the feature off on networks you do not
+  trust.
 
 ---
 
@@ -194,6 +221,7 @@ latent/
 │   ├── PhotoIO/               reader/writer, EXIF round-trip, colour-space handling
 │   ├── PhotoML/               tiling, CoreML wrappers, model registry, face detect/composite
 │   ├── PhotoSearch/           embeddings, per-folder index, CLIP encoders, BPE tokenizer
+│   ├── PhotoServe/            LAN listener, routes, pairing, the phone client
 │   ├── PhotoViewerApp/        the SwiftUI app
 │   ├── PhotoQuickLook/        QuickLookRenderer
 │   └── PipelineCLI/           pv-pipeline
@@ -265,7 +293,10 @@ Latent is pre-1.0. It is a working app, not a shipped product:
 - The Quick Look extension target isn't built yet — `PhotoQuickLook.QuickLookRenderer` is written
   and ready for it.
 - Display is not yet Metal-backed, so HDR and wide-gamut rendering aren't what they could be.
-- Text search requires the converted OpenCLIP assets; image-to-image similarity does too.
+- Search cannot be used yet. `SearchEngine` indexes a folder and queries the index, and the phone
+  companion reads one when it finds it, but nothing in the app or the CLI calls `indexFolder`, so
+  no index gets built. Both text search and image-to-image similarity also need the converted
+  OpenCLIP assets.
 
 ---
 

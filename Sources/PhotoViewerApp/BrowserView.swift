@@ -13,7 +13,6 @@ enum BrowseMode: String, CaseIterable, Identifiable {
 struct BrowserView: View {
     @Bindable var state: AppState
     @State private var thumbnailSize: CGFloat = 160
-    @State private var vimKeymap = VimKeymap()
     @State private var locationCache = PhotoLocationCache()
     @State private var mode: BrowseMode = .grid
     @State private var showShortcutOverlay = false
@@ -119,8 +118,20 @@ struct BrowserView: View {
         // Folder switch hooks.
         .onChange(of: state.folder) { _, newFolder in
             if let folder = newFolder {
-                if let loaded = try? VimKeymap.load(folder: folder) {
-                    vimKeymap = loaded
+                // A failed load must still replace the keymap. Keeping the
+                // previous folder's picks, labels and marks means the next
+                // pick re-saves them into *this* folder's state file, where
+                // `VimKeymap.relativePath` writes them as absolute paths into
+                // the old folder — corrupt, deterministic and session-long.
+                do {
+                    state.vimKeymap = try VimKeymap.load(folder: folder)
+                } catch {
+                    state.vimKeymap = VimKeymap()
+                    // Worth an alert: the picks and labels are simply gone for
+                    // this session, and a silent reset looks like the app lost
+                    // them. The raw error stays out of it — a decoding dump is
+                    // not something to put in front of someone.
+                    state.lastError = "Couldn't read the saved picks and labels for this folder, so it's starting fresh."
                 }
             }
             // Forget GPS cache for the previous folder. We'll lazy-rebuild
@@ -145,6 +156,10 @@ struct BrowserView: View {
         .onAppear { viewerFocused = true }
         .onDisappear { enhanceState.reset() }
     }
+
+    /// Reads through `state` so Observation tracking sees the same source
+    /// of truth the phone companion (Task 6) will dispatch into.
+    private var vimKeymap: VimKeymap { state.vimKeymap }
 
     @ViewBuilder
     private var sidebar: some View {
@@ -440,23 +455,8 @@ struct BrowserView: View {
             totalCount: state.imageURLs.count
         )
 
-        switch action {
-        case .next:    state.selectNext()
-        case .prev:    state.selectPrevious()
-        case .first:   state.selectFirst()
-        case .last:    state.selectLast()
-        case .jumpToMark(let c):
-            if let url = vimKeymap.marks[c] { state.select(url: url) }
-        case .setMark, .setColorLabel, .togglePick, .toggleReject:
-            // VimKeymap already updated its own state; persist asynchronously.
-            if let folder = state.folder {
-                Task.detached { @MainActor in
-                    try? vimKeymap.save(folder: folder)
-                }
-            }
-        case .none:
-            return .ignored
-        }
+        if action == .none { return .ignored }
+        state.dispatch(action)
         return .handled
     }
 

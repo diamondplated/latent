@@ -158,6 +158,57 @@ public func vimShiftPTogglesPick() async throws {
     try require(!keymap.isPicked(url), "second P should unpick url")
 }
 
+/// A folder whose state file cannot be read must install an *empty* keymap,
+/// never keep the previous folder's. `BrowserView`'s folder-change hook is the
+/// only caller, and it does exactly what this pins:
+/// `(try? VimKeymap.load(folder:)) ?? VimKeymap()`. Keeping the old keymap
+/// means the next pick re-saves the previous folder's picks into this folder's
+/// state file, and `relativePath` writes them as absolute paths pointing back
+/// at the folder the user left.
+@MainActor
+public func vimLoadFailureYieldsAnEmptyKeymap() async throws {
+    let previous = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pv_vim_prev_\(UUID().uuidString)")
+    let corrupt = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pv_vim_future_\(UUID().uuidString)")
+    for folder in [previous, corrupt] {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+    defer {
+        for folder in [previous, corrupt] {
+            try? FileManager.default.removeItem(at: folder)
+            if let stateFile = try? VimKeymap.stateFileURL(for: folder) {
+                try? FileManager.default.removeItem(at: stateFile)
+            }
+        }
+    }
+
+    // The folder the user is leaving, with real cull state on it.
+    let previousPhoto = previous.appendingPathComponent("kept.jpg")
+    var keymap = VimKeymap()
+    _ = keymap.handle(keyCharacter: "P", modifiers: [.shift], currentURL: previousPhoto, currentIndex: 0, totalCount: 1)
+    _ = keymap.handle(keyCharacter: "4", modifiers: [], currentURL: previousPhoto, currentIndex: 0, totalCount: 1)
+    try require(keymap.isPicked(previousPhoto), "fixture should start with a pick")
+
+    // Both ways the load can fail: a future schema version, and bytes that are
+    // not JSON at all.
+    let future = """
+    {"version": 999, "folderPath": "\(corrupt.path)", "updatedAt": "2030-01-01T00:00:00Z",
+     "marks": {}, "colorLabels": {}, "picks": [], "rejects": []}
+    """
+    for bytes in [Data(future.utf8), Data("not json".utf8)] {
+        try bytes.write(to: try VimKeymap.stateFileURL(for: corrupt), options: .atomic)
+        var threw = false
+        do { _ = try VimKeymap.load(folder: corrupt) } catch { threw = true }
+        try require(threw, "load must throw on an unreadable state file")
+
+        keymap = (try? VimKeymap.load(folder: corrupt)) ?? VimKeymap()
+        try require(!keymap.isPicked(previousPhoto), "the previous folder's pick survived a failed load")
+        try require(keymap.picks.isEmpty && keymap.rejects.isEmpty && keymap.colorLabels.isEmpty && keymap.marks.isEmpty,
+                    "a failed load must install an empty keymap, got \(keymap.picks.count) picks / \(keymap.colorLabels.count) labels")
+    }
+}
+
 @MainActor
 public func vimSaveLoadRoundtrip() async throws {
     let folder = URL(fileURLWithPath: NSTemporaryDirectory())

@@ -10,6 +10,7 @@ import PhotoSearch
 import PhotoViewerCore
 import PhotoGeo
 import PhotoQuickLook
+import PhotoServe
 
 // CLI entry. Doubles as an executable verifier for the pipeline, since this
 // project currently runs against macOS CommandLineTools (no XCTest framework).
@@ -59,6 +60,39 @@ struct PipelineCLI {
         failures += await runVerification("VimKeymap: save/load roundtrip preserves marks/labels/picks") {
             try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
         }
+        failures += await runVerification("VimKeymap: an unreadable state file yields an empty keymap, not the last folder's") {
+            try await Task { @MainActor in try await vimLoadFailureYieldsAnEmptyKeymap() }.value
+        }
+        failures += await runVerification("HTTPRequest: parses request line, query and case-insensitive headers", check: httpParsesRequestLineAndHeaders)
+        failures += await runVerification("HTTPRequest: reads body per Content-Length", check: httpParsesBodyByContentLength)
+        failures += await runVerification("HTTPRequest: rejects malformed requests", check: httpRejectsMalformedRequests)
+        failures += await runVerification("HTTPRequest: expectedLength reports nil until the body is complete", check: httpExpectedLengthDetectsIncompleteRequest)
+        failures += await runVerification("HTTPRequest: refuses overflowing, negative and conflicting Content-Length", check: httpRefusesHostileContentLength)
+        failures += await runVerification("HTTPResponse: serializes status line, headers and body", check: httpResponseSerializesStatusAndBody)
+        failures += await runVerification("AddressGate: accepts loopback, RFC1918, link-local and ULA", check: addressGateAcceptsPrivateRanges)
+        failures += await runVerification("AddressGate: refuses public and malformed addresses", check: addressGateRejectsPublicAddresses)
+        failures += await runVerification("SharedFolders: issued IDs resolve and carry no path text", check: sharedFoldersResolveOnlyIssuedIDs)
+        failures += await runVerification("SharedFolders: photos are named by their path under the shared root", check: sharedFoldersNamePhotosByPathUnderTheRoot)
+        failures += await runVerification("SharedFolders: unknown and traversal IDs never resolve", check: sharedFoldersRejectUnknownAndTraversalIDs)
+        failures += await runVerification("SharedFolders: unshare invalidates every issued ID", check: sharedFoldersUnshareInvalidatesIDs)
+        failures += await runVerification("PairingManager: a pairing code works exactly once", check: pairingCodeIsSingleUse)
+        failures += await runVerification("PairingManager: a pairing code expires after 60s", check: pairingCodeExpires)
+        failures += await runVerification("PairingManager: wrong codes are refused, then rate limited", check: pairingRejectsWrongCodeAndRateLimits)
+        failures += await runVerification("PairingManager: codes are 128-bit and non-repeating", check: pairingCodeHasEnoughEntropy)
+        failures += await runVerification("PairingManager: device tokens validate and revoke", check: pairingTokensValidateAndRevoke)
+        failures += await runVerification("PairingManager: stores a token hash, never the token", check: pairingStoresTokenHashNotToken)
+        failures += await runVerification("Router: refuses API requests with no token", check: routerRefusesUnauthenticatedAPIRequests)
+        failures += await runVerification("Router: refuses a valid token from a public address", check: routerRefusesNonPrivateHosts)
+        failures += await runVerification("Router: serves the folder list with a valid token", check: routerServesAPIWithValidToken)
+        failures += await runVerification("Router: a declined pairing issues no token", check: routerPairingRequiresApproval)
+        failures += await runVerification("Router: an approved pairing issues a working token", check: routerPairingIssuesTokenWhenApproved)
+        failures += await runVerification("Router: swipe actions map onto VimActions", check: routerMapsSwipeActionsToVimActions)
+        failures += await runVerification("Router: unknown action names are rejected", check: routerRejectsUnknownActionNames)
+        failures += await runVerification("Router: search 404s with no index, 400s on an empty query", check: routerHidesSearchWhenTheFolderHasNoIndex)
+        failures += await runVerification("Router: search results keep their rank order", check: routerPreservesSearchRankOrder)
+        failures += await runVerification("SSE: frames carry event and data lines and end blank", check: sseFramesAreWellFormed)
+        failures += await runVerification("SSE: multi-line payloads split across data lines", check: sseFramesEscapeNewlinesInData)
+        failures += await runVerification("HTTPRequest: parses correctly from a non-zero-startIndex Data slice", check: httpParsesFromNonZeroStartIndexSlice)
         failures += await runVerification("PhotoGeo: extractGPS reads lat/lon from a synthetic JPEG", check: extractGPSFromSyntheticJPEG)
         failures += await runVerification("QuickLookRenderer: synthetic JPEG renders within max dimension", check: quickLookRenderRespectsMaxDimension)
         failures += await runVerification("QuickLookRenderer: rejects unsupported file extensions", check: quickLookRenderRejectsUnsupported)

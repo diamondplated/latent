@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import PhotoIO
+import PhotoViewerCore
 
 /// Holds the currently-selected folder and the list of image URLs in it.
 /// Watches the folder for changes via DispatchSource so adds/removes update
@@ -17,7 +18,27 @@ final class AppState {
     /// extraction when the user opened an archive).
     var folder: URL? = nil
     /// Image URLs in `folder` and any subfolders, sorted by relative path.
-    var imageURLs: [URL] = []
+    ///
+    /// Every commit — first load, watcher rescan, optimistic trash removal,
+    /// re-sort, folder close — republishes the list to the phone. Hanging the
+    /// sync off the property rather than off each call site means a commit
+    /// added later cannot forget to do it. `syncSharedFolder` returns
+    /// immediately when phone access is off, so the common case costs one
+    /// no-op task.
+    var imageURLs: [URL] = [] {
+        didSet {
+            // Re-sharing retires and re-mints every photo ID, so a no-op
+            // assignment — a re-sort that changed nothing, a trash sweep that
+            // matched nothing — must not trigger one.
+            guard oldValue != imageURLs else { return }
+            Task { await phoneAccess.syncSharedFolder() }
+        }
+    }
+
+    /// Phone companion. Created on first touch — nothing listens on the
+    /// network until the user turns it on in the pairing sheet.
+    @ObservationIgnored
+    lazy var phoneAccess = PhoneAccessController(state: self)
 
     // MARK: - Composed sub-objects
 
@@ -56,6 +77,11 @@ final class AppState {
     /// Owned here so trashImage / closeFolder can poke it. The prefetch
     /// window is updated by BrowserView when selectedIndex changes.
     let prefetcher = ImagePrefetcher(capacity: 5)
+    /// Vim keymap state: marks, colour labels, picks, rejects. Lives here
+    /// rather than on BrowserView because the keyboard is no longer the only
+    /// input device — the phone companion dispatches the same `VimAction`
+    /// values through `dispatch(_:)`. One owner, one writer.
+    var vimKeymap = VimKeymap()
 
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
@@ -528,6 +554,46 @@ final class AppState {
     func selectFirst() { selection.selectFirst() }
     func selectLast() { selection.selectLast() }
     func select(url: URL) { selection.select(url: url) }
+
+    // MARK: - Vim action dispatch
+
+    /// Apply one `VimAction`, whatever produced it. The keyboard produces
+    /// these via `VimKeymap.handle`; the phone companion produces them from
+    /// swipe gestures. Both land here, so picks, rejects, labels and the
+    /// sidecar write happen in exactly one place.
+    ///
+    /// `VimKeymap` has already mutated its own state for the label/pick/
+    /// reject/mark cases by the time we see the action — this method's job is
+    /// navigation plus persistence.
+    func dispatch(_ action: VimAction) {
+        switch action {
+        case .next:  selectNext()
+        case .prev:  selectPrevious()
+        case .first: selectFirst()
+        case .last:  selectLast()
+        case .jumpToMark(let c):
+            if let url = vimKeymap.marks[c] { select(url: url) }
+        case .setColorLabel, .togglePick, .toggleReject:
+            if let folder { vimKeymap.saveInBackground(folder: folder) }
+            // Both writers land here — the keyboard via BrowserView, the phone
+            // via PhoneAccessController.apply — and both have already mutated
+            // the keymap and put the affected photo under `currentURL` by the
+            // time dispatch runs. So this is the one place that knows a photo's
+            // state changed, whoever changed it, which is why the phone is told
+            // from here rather than from either caller.
+            if let url = currentURL {
+                let picked = vimKeymap.isPicked(url)
+                let rejected = vimKeymap.isRejected(url)
+                let label = vimKeymap.colorLabel(for: url)
+                Task { await phoneAccess.publish(url: url, picked: picked, rejected: rejected, label: label) }
+            }
+        case .setMark:
+            // Marks are Mac-only navigation; the phone has no concept of them.
+            if let folder { vimKeymap.saveInBackground(folder: folder) }
+        case .none:
+            break
+        }
+    }
 
     func stopWatching() {
         fileWatcher?.cancel()
