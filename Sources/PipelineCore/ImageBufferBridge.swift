@@ -69,7 +69,10 @@ extension ImageBuffer {
             bitsPerComponent: bitsPerComponent,
             bytesPerRow: bytesPerRow,
             space: space,
-            bitmapInfo: bitmapInfo
+            // CGContext takes the raw UInt32; CGImage below takes the CGBitmapInfo
+            // struct itself. Passing the struct here builds against newer SDKs but
+            // fails on macOS 15 and earlier.
+            bitmapInfo: bitmapInfo.rawValue
         ) else {
             buffer.deallocate()
             throw ImageBufferBridgeError.contextCreationFailed
