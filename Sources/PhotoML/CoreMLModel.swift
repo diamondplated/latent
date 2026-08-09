@@ -219,10 +219,13 @@ public actor CoreMLImageModel {
         case .int32:
             let typed = ptr.assumingMemoryBound(to: Int32.self)
             for i in 0..<total { values[i] = Float(typed[i]) }
-        case .int8:
-            throw CoreMLModelError.unexpectedOutputType("int8 (quantized) output not supported yet — convert model with float16/float32 precision")
-        @unknown default:
-            throw CoreMLModelError.unexpectedOutputType("unsupported MLMultiArrayDataType: \(outputArray.dataType.rawValue)")
+        default:
+            // Deliberately not `@unknown default` with a named `.int8` case:
+            // MLMultiArrayDataType.int8 does not exist in the macOS 15 SDK, so
+            // naming it breaks the build there. Quantized outputs land here.
+            throw CoreMLModelError.unexpectedOutputType(
+                "unsupported MLMultiArrayDataType (raw \(outputArray.dataType.rawValue)) — "
+                + "if this is a quantized (int8) model, re-convert it with float16 or float32 precision")
         }
 
         return TensorOutput(values: values, shape: shape)
