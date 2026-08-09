@@ -173,3 +173,102 @@ func sharedFoldersUnshareInvalidatesIDs() async throws {
     let remainingFolders = await shared.folders()
     try require(remainingFolders.isEmpty, "folder list should be empty after unshare")
 }
+
+// MARK: - Pairing verifications
+
+func pairingCodeIsSingleUse() async throws {
+    let now = Date(timeIntervalSince1970: 1_770_000_000)
+    let mgr = PairingManager()
+    let code = await mgr.issueCode(now: now)
+
+    try await mgr.validate(code: code, now: now.addingTimeInterval(5))
+
+    do {
+        try await mgr.validate(code: code, now: now.addingTimeInterval(6))
+        throw VerifyError(message: "second redemption of the same code must fail")
+    } catch let e as PairingError {
+        try require(e == .noActiveCode, "expected .noActiveCode on replay, got \(e)")
+    }
+}
+
+func pairingCodeExpires() async throws {
+    let now = Date(timeIntervalSince1970: 1_770_000_000)
+    let mgr = PairingManager()
+    let code = await mgr.issueCode(now: now)
+
+    do {
+        try await mgr.validate(code: code, now: now.addingTimeInterval(61))
+        throw VerifyError(message: "a code older than 60s must not validate")
+    } catch let e as PairingError {
+        try require(e == .codeExpired, "expected .codeExpired, got \(e)")
+    }
+}
+
+func pairingRejectsWrongCodeAndRateLimits() async throws {
+    let now = Date(timeIntervalSince1970: 1_770_000_000)
+    let mgr = PairingManager()
+    _ = await mgr.issueCode(now: now)
+
+    // Five wrong guesses are refused as wrong; the sixth is rate limited.
+    for attempt in 1...5 {
+        do {
+            try await mgr.validate(code: "0000", now: now.addingTimeInterval(Double(attempt)))
+            throw VerifyError(message: "wrong code accepted on attempt \(attempt)")
+        } catch let e as PairingError {
+            try require(e == .wrongCode, "attempt \(attempt): expected .wrongCode, got \(e)")
+        }
+    }
+    do {
+        try await mgr.validate(code: "0000", now: now.addingTimeInterval(6))
+        throw VerifyError(message: "sixth attempt in a minute must be rate limited")
+    } catch let e as PairingError {
+        try require(e == .rateLimited, "expected .rateLimited, got \(e)")
+    }
+}
+
+func pairingCodeHasEnoughEntropy() async throws {
+    let now = Date(timeIntervalSince1970: 1_770_000_000)
+    var seen = Set<String>()
+    for _ in 0..<200 {
+        let mgr = PairingManager()
+        let code = await mgr.issueCode(now: now)
+        try require(code.count == 32, "expected 32 hex chars (128 bits), got \(code.count)")
+        try require(code.allSatisfy { $0.isHexDigit }, "code is not hex: \(code)")
+        seen.insert(code)
+    }
+    try require(seen.count == 200, "codes repeated across 200 draws — not random")
+}
+
+func pairingTokensValidateAndRevoke() async throws {
+    let mgr = PairingManager()
+    let token = await mgr.registerDevice(name: "iPhone")
+
+    // `require` takes a non-async @autoclosure, so awaited values are bound
+    // to a local `let` first and asserted on afterward.
+    let validFreshToken = await mgr.isValidToken(token)
+    try require(validFreshToken, "freshly issued token must validate")
+    let validLongerToken = await mgr.isValidToken(token + "x")
+    try require(!validLongerToken, "a longer token must not validate")
+    let validEmptyToken = await mgr.isValidToken("")
+    try require(!validEmptyToken, "empty token must not validate")
+    let validSameLengthWrongToken = await mgr.isValidToken(String(repeating: "a", count: token.count))
+    try require(!validSameLengthWrongToken, "a same-length wrong token must not validate")
+
+    let devices = await mgr.devices()
+    try require(devices.count == 1, "expected 1 device, got \(devices.count)")
+    try require(devices[0].name == "iPhone", "device name lost")
+
+    await mgr.revoke(deviceID: devices[0].id)
+    let validAfterRevoke = await mgr.isValidToken(token)
+    try require(!validAfterRevoke, "revoked token must stop validating")
+    let devicesAfterRevoke = await mgr.devices()
+    try require(devicesAfterRevoke.isEmpty, "device list should be empty after revoke")
+}
+
+func pairingStoresTokenHashNotToken() async throws {
+    let mgr = PairingManager()
+    let token = await mgr.registerDevice(name: "iPad")
+    let devices = await mgr.devices()
+    try require(devices[0].tokenHash != token, "the raw token must not be retained")
+    try require(devices[0].tokenHash.count == 64, "expected a SHA-256 hex digest, got \(devices[0].tokenHash.count) chars")
+}
