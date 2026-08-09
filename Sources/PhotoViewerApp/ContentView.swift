@@ -7,6 +7,7 @@ struct ContentView: View {
     /// otherwise arrow keys do nothing on the first folder you load (the
     /// monitor's host view is still in empty state).
     @State private var keyMonitor = NavigationKeyMonitor()
+    @State private var showPairing = false
 
     var body: some View {
         Group {
@@ -25,6 +26,21 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showPairing = true
+                } label: {
+                    Label("Phone access", systemImage: "iphone")
+                }
+                .help("Use your phone to cull this folder")
+            }
+        }
+        // The displayed pairing code dies with the sheet, so a photo of the
+        // screen taken after it closes is worth nothing.
+        .sheet(isPresented: $showPairing, onDismiss: {
+            Task { await state.phoneAccess.closePairingSheet() }
+        }) {
+            PairingSheet(controller: state.phoneAccess, ui: state.phoneAccess.ui)
         }
         .onAppear { keyMonitor.install(state: state) }
         .onDisappear { keyMonitor.uninstall() }

@@ -18,7 +18,21 @@ final class AppState {
     /// extraction when the user opened an archive).
     var folder: URL? = nil
     /// Image URLs in `folder` and any subfolders, sorted by relative path.
-    var imageURLs: [URL] = []
+    ///
+    /// Every commit — first load, watcher rescan, optimistic trash removal,
+    /// re-sort, folder close — republishes the list to the phone. Hanging the
+    /// sync off the property rather than off each call site means a commit
+    /// added later cannot forget to do it. `syncSharedFolder` returns
+    /// immediately when phone access is off, so the common case costs one
+    /// no-op task.
+    var imageURLs: [URL] = [] {
+        didSet { Task { await phoneAccess.syncSharedFolder() } }
+    }
+
+    /// Phone companion. Created on first touch — nothing listens on the
+    /// network until the user turns it on in the pairing sheet.
+    @ObservationIgnored
+    lazy var phoneAccess = PhoneAccessController(state: self)
 
     // MARK: - Composed sub-objects
 
