@@ -86,3 +86,84 @@ func httpResponseSerializesStatusAndBody() async throws {
     try require(String(decoding: notFound.serialize(), as: UTF8.self).hasPrefix("HTTP/1.1 404 Not Found\r\n"),
                 "404 status line wrong")
 }
+
+// MARK: - Address gate verifications
+
+func addressGateAcceptsPrivateRanges() async throws {
+    let allowed = [
+        "127.0.0.1", "10.0.0.5", "10.255.255.254",
+        "172.16.0.1", "172.31.255.254",
+        "192.168.1.20", "169.254.10.1",
+        "::1", "fe80::1c2b:3d4e", "fd00::42",
+    ]
+    for host in allowed {
+        try require(AddressGate.isPrivate(host), "\(host) should be treated as LAN-local")
+    }
+}
+
+func addressGateRejectsPublicAddresses() async throws {
+    let denied = [
+        "8.8.8.8", "1.1.1.1", "172.32.0.1", "172.15.255.255",
+        "192.169.0.1", "203.0.113.7", "2606:4700::1111",
+        "", "not-an-address", "999.999.999.999",
+    ]
+    for host in denied {
+        try require(!AddressGate.isPrivate(host), "\(host) must be refused")
+    }
+}
+
+// MARK: - SharedFolders verifications
+
+func sharedFoldersResolveOnlyIssuedIDs() async throws {
+    let root = URL(fileURLWithPath: "/Users/someone/Pictures/2024")
+    let photos = [root.appendingPathComponent("a.jpg"), root.appendingPathComponent("b.jpg")]
+
+    let shared = SharedFolders()
+    let folderID = await shared.share(folder: root, photos: photos)
+
+    let entries = await shared.photos(in: folderID)
+    try require(entries.count == 2, "expected 2 entries, got \(entries.count)")
+
+    let first = entries[0]
+    let resolved = await shared.photoURL(forID: first.id)
+    try require(resolved == photos[0], "issued ID resolved to \(String(describing: resolved))")
+
+    // IDs are opaque: they must not contain the filename or any path text.
+    try require(!first.id.contains("a.jpg") && !first.id.contains("/"),
+                "photo ID leaks path information: \(first.id)")
+}
+
+func sharedFoldersRejectUnknownAndTraversalIDs() async throws {
+    let root = URL(fileURLWithPath: "/Users/someone/Pictures/2024")
+    let shared = SharedFolders()
+    _ = await shared.share(folder: root, photos: [root.appendingPathComponent("a.jpg")])
+
+    let hostile = [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "a.jpg",
+        "",
+        UUID().uuidString,   // well-formed but never issued
+    ]
+    for id in hostile {
+        let resolved = await shared.photoURL(forID: id)
+        try require(resolved == nil, "id \(id.debugDescription) must not resolve, got \(String(describing: resolved))")
+    }
+}
+
+func sharedFoldersUnshareInvalidatesIDs() async throws {
+    let root = URL(fileURLWithPath: "/Users/someone/Pictures/2024")
+    let photo = root.appendingPathComponent("a.jpg")
+    let shared = SharedFolders()
+    let folderID = await shared.share(folder: root, photos: [photo])
+    let entries = await shared.photos(in: folderID)
+    let id = entries[0].id
+
+    let resolvedBeforeUnshare = await shared.photoURL(forID: id)
+    try require(resolvedBeforeUnshare != nil, "id should resolve while shared")
+    await shared.unshare(folderID)
+    let resolvedAfterUnshare = await shared.photoURL(forID: id)
+    try require(resolvedAfterUnshare == nil, "id must stop resolving after unshare")
+    let remainingFolders = await shared.folders()
+    try require(remainingFolders.isEmpty, "folder list should be empty after unshare")
+}
