@@ -51,6 +51,27 @@ files stay exactly where they are, and everything the app can do runs on your ow
 
 ---
 
+## Install
+
+```sh
+brew install --cask diamondplated/tap/latent
+```
+
+Or grab the zip from [Releases](https://github.com/diamondplated/latent/releases/latest)
+(Apple silicon, macOS 14+).
+
+**macOS will block the first launch** — this build is ad-hoc signed, not notarized, because the
+project has no Apple Developer ID. Approve it once under **System Settings → Privacy & Security**,
+or strip the quarantine attribute yourself if you trust the build:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Latent.app
+```
+
+The downloadable build ships no model weights — see [below](#quick-start). It works without them.
+
+---
+
 ## Quick start
 
 ```bash
