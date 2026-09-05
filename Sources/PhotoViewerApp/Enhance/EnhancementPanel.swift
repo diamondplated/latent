@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Side panel: 5 collapsible per-stage sections plus the global controls
-/// (Show Original toggle, Apply & Save, status row). Sized for a comfortable
+/// Side panel: four collapsible per-stage sections plus the global controls
+/// (comparison picker, Export Copy, status row). Sized for a comfortable
 /// HSplitView width on a 13" laptop without crowding the image.
 @MainActor
 struct EnhancementPanel: View {
@@ -17,46 +17,77 @@ struct EnhancementPanel: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Enhancements")
-                        .font(.headline)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 12)
+                    HStack {
+                        Text("Enhancements")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            state.resetEnhancements()
+                        } label: {
+                            Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                                .labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Reset enhancement settings for this photo")
+                        .disabled(!state.canResetRecipe || state.isExporting)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
 
-                    // Sharpen first — it's the one stage that always works
-                    // without any models installed, so it's the most useful
-                    // default for a fresh user.
-                    stageSection(
-                        title: "Sharpen",
-                        isExpanded: $sharpenExpanded,
-                        enabled: state.sharpenEnabled,
-                        status: StageStatusResolver.sharpen()
-                    ) {
-                        SharpenControls(state: state)
+                    if state.isLoadingRecipe {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading saved recipe…")
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                    } else if state.currentURL != nil && !state.canEnhanceCurrentMedia {
+                        Label("Enhancements are available for still images only.", systemImage: "info.circle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
                     }
-                    stageSection(
-                        title: "Upscale",
-                        isExpanded: $upscaleExpanded,
-                        enabled: state.upscaleEnabled,
-                        status: StageStatusResolver.upscale(params: state.upscaleParams)
-                    ) {
-                        UpscaleControls(state: state)
+
+                    Group {
+                        // Sharpen first — it's the one stage that always works
+                        // without any models installed, so it's the most useful
+                        // default for a fresh user.
+                        stageSection(
+                            title: "Sharpen",
+                            isExpanded: $sharpenExpanded,
+                            enabled: state.sharpenEnabled,
+                            status: StageStatusResolver.sharpen()
+                        ) {
+                            SharpenControls(state: state)
+                        }
+                        stageSection(
+                            title: "Upscale",
+                            isExpanded: $upscaleExpanded,
+                            enabled: state.upscaleEnabled,
+                            status: StageStatusResolver.upscale(params: state.upscaleParams)
+                        ) {
+                            UpscaleControls(state: state)
+                        }
+                        stageSection(
+                            title: "Denoise",
+                            isExpanded: $denoiseExpanded,
+                            enabled: state.denoiseEnabled,
+                            status: StageStatusResolver.denoise()
+                        ) {
+                            DenoiseControls(state: state)
+                        }
+                        stageSection(
+                            title: "Artifact Removal",
+                            isExpanded: $artifactRemovalExpanded,
+                            enabled: state.artifactRemovalEnabled,
+                            status: StageStatusResolver.artifactRemoval()
+                        ) {
+                            ArtifactRemovalControls(state: state)
+                        }
                     }
-                    stageSection(
-                        title: "Denoise",
-                        isExpanded: $denoiseExpanded,
-                        enabled: state.denoiseEnabled,
-                        status: StageStatusResolver.denoise()
-                    ) {
-                        DenoiseControls(state: state)
-                    }
-                    stageSection(
-                        title: "Artifact Removal",
-                        isExpanded: $artifactRemovalExpanded,
-                        enabled: state.artifactRemovalEnabled,
-                        status: StageStatusResolver.artifactRemoval()
-                    ) {
-                        ArtifactRemovalControls(state: state)
-                    }
+                    .disabled(!state.canEnhanceCurrentMedia || state.isExporting)
+                    .opacity(state.canEnhanceCurrentMedia && !state.isExporting ? 1 : 0.55)
 
                     Spacer(minLength: 8)
                 }
@@ -152,6 +183,7 @@ struct EnhancementPanel: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .disabled(!state.canEnhanceCurrentMedia || state.isExporting)
             .onChange(of: state.compareMode) { _, newMode in
                 if newMode != .original {
                     state.ensureEnhancedAvailable()
@@ -162,15 +194,14 @@ struct EnhancementPanel: View {
                 Button {
                     Task { await state.saveEnhanced() }
                 } label: {
-                    Label("Apply & Save", systemImage: "square.and.arrow.down")
+                    Label("Export Copy", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
-                .keyboardShortcut("s", modifiers: .command)
-                // Enabled as soon as a photo is selected — the save path
-                // lazy-loads the buffer if we haven't done the heavy decode
-                // yet (default browsing case).
-                .disabled(state.currentURL == nil)
+                // Enabled as soon as a supported still is selected — the
+                // export path lazy-loads the buffer if we haven't done the
+                // heavy decode yet (default browsing case).
+                .disabled(!state.canEnhanceCurrentMedia || state.isExporting)
             }
 
             statusRow
@@ -185,6 +216,13 @@ struct EnhancementPanel: View {
                 .font(.caption)
                 .foregroundStyle(.red)
                 .lineLimit(2)
+        } else if state.isExporting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Exporting copy…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         } else if state.isProcessing {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -192,6 +230,17 @@ struct EnhancementPanel: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        } else if let url = state.lastExportedURL {
+            Label("Exported \(url.lastPathComponent)", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        } else if let warning = state.recipeWarning {
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(3)
         } else if let url = state.currentURL {
             Text(url.lastPathComponent)
                 .font(.caption)

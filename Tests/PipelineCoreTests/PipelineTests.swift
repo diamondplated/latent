@@ -155,6 +155,39 @@ final class SidecarTests: XCTestCase {
         let loaded = try EnhanceSidecar.load(for: tmp)
         XCTAssertNil(loaded)
     }
+
+    func testReplacingKnownStepsPreservesUnknownStagesAndOrder() throws {
+        let original = EnhanceSidecar(steps: [
+            .init(stageID: "future-before", enabled: true, parameters: try ParameterBag(["value": 1])),
+            .init(
+                stageID: "denoise-nafnet",
+                enabled: false,
+                parameters: try ParameterBag(Denoise.Params(strength: 0.1, preserveDetailBias: 0.2))
+            ),
+            .init(stageID: "future-after", enabled: false, parameters: try ParameterBag(["value": 2])),
+        ])
+        let replacement = EnhanceSidecar.SidecarStep(
+            stageID: "denoise-nafnet",
+            enabled: true,
+            parameters: try ParameterBag(Denoise.Params(strength: 0.9, preserveDetailBias: 0.8))
+        )
+        let appended = EnhanceSidecar.SidecarStep(
+            stageID: "upscale",
+            enabled: true,
+            parameters: try ParameterBag(Upscale.Params(scale: 4))
+        )
+
+        let updated = original.replacingSteps(with: [replacement, appended])
+
+        XCTAssertEqual(updated.steps.map(\.stageID), [
+            "future-before", "denoise-nafnet", "future-after", "upscale",
+        ])
+        XCTAssertTrue(updated.steps[1].enabled)
+        let decoded = try updated.steps[1].parameters.decode(as: Denoise.Params.self)
+        XCTAssertEqual(decoded.strength, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(decoded.preserveDetailBias, 0.8, accuracy: 1e-9)
+        XCTAssertEqual(updated.createdAt, original.createdAt)
+    }
 }
 
 final class CacheTests: XCTestCase {

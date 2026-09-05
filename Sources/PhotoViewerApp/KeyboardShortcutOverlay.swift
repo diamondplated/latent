@@ -9,8 +9,8 @@ struct KeyboardShortcutOverlay: View {
 
     private let sections: [(title: String, shortcuts: [(key: String, action: String)])] = [
         ("Navigation", [
-            ("j / →", "Next photo"),
-            ("k / ←", "Previous photo"),
+            ("j / k", "Next / previous item"),
+            ("→ / ←", "Next / previous image"),
             ("gg", "First photo"),
             ("G", "Last photo"),
             ("⌘↑", "Parent folder"),
@@ -33,6 +33,9 @@ struct KeyboardShortcutOverlay: View {
         ]),
         ("Viewing", [
             ("B (hold)", "Blink original"),
+            ("Video Space", "Play / pause"),
+            ("Video ← / →", "Seek 5 seconds"),
+            ("Video ↑ / ↓", "Adjust volume"),
             ("Double-click", "Zoom cycle (2× → 3× → 4× → fit)"),
             ("Pinch / scroll", "Zoom in/out"),
             ("Drag", "Pan"),
@@ -40,7 +43,7 @@ struct KeyboardShortcutOverlay: View {
         ("Actions", [
             ("⌫", "Move to Trash"),
             ("⌘Z", "Undo Trash"),
-            ("⌘S", "Apply & Save (enhanced)"),
+            ("⌘S", "Export enhanced copy"),
             ("⌘E", "Toggle enhancement panel"),
             ("⌘L", "Toggle folder tree"),
             ("⌘O", "Open folder"),

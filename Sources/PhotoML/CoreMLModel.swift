@@ -31,6 +31,12 @@ public enum CoreMLModelError: Error, CustomStringConvertible {
 public struct TensorSpec: Sendable {
     public enum ChannelOrder: Sendable { case rgb, bgr }
     public enum DataType: Sendable { case float32, float16 }
+    public enum TransferFunction: Sendable {
+        /// Tensor values represent linear-light RGB.
+        case linear
+        /// Tensor values represent IEC 61966-2-1 nonlinear sRGB.
+        case sRGB
+    }
     public enum Layout: Sendable {
         /// `[batch, channels, height, width]` — most PyTorch conversions.
         case nchw
@@ -46,6 +52,12 @@ public struct TensorSpec: Sendable {
     /// Pixel value range expected at input. (0, 1) is most common; (-1, 1) for
     /// some GAN-trained networks.
     public let inputRange: (Float, Float)
+    /// Pixel value range produced by an image output. Defaults to inputRange.
+    public let outputRange: (Float, Float)
+    /// Transfer functions are explicit because `ImageBuffer.working` is
+    /// linear-light while the standard PyTorch image tensors are nonlinear.
+    public let inputTransferFunction: TransferFunction
+    public let outputTransferFunction: TransferFunction
 
     public init(
         inputName: String,
@@ -53,7 +65,10 @@ public struct TensorSpec: Sendable {
         channelOrder: ChannelOrder = .rgb,
         dataType: DataType = .float32,
         layout: Layout = .nchw,
-        inputRange: (Float, Float) = (0, 1)
+        inputRange: (Float, Float) = (0, 1),
+        outputRange: (Float, Float)? = nil,
+        inputTransferFunction: TransferFunction = .sRGB,
+        outputTransferFunction: TransferFunction = .sRGB
     ) {
         self.inputName = inputName
         self.outputName = outputName
@@ -61,6 +76,9 @@ public struct TensorSpec: Sendable {
         self.dataType = dataType
         self.layout = layout
         self.inputRange = inputRange
+        self.outputRange = outputRange ?? inputRange
+        self.inputTransferFunction = inputTransferFunction
+        self.outputTransferFunction = outputTransferFunction
     }
 
     /// Default Real-ESRGAN spec from the standard PyTorch → CoreML conversion.
@@ -84,8 +102,8 @@ public struct TensorSpec: Sendable {
         inputRange: (0, 1)
     )
 
-    /// FBCNN artifact-removal default spec. Single-channel quality factor
-    /// input is supplied internally; the model's image input is RGB NCHW.
+    /// FBCNN artifact-removal default spec. The converted model estimates its
+    /// own quality factor internally and exposes only its RGB image output.
     public static let fbcnn = TensorSpec(
         inputName: "input",
         outputName: "output",
@@ -149,7 +167,11 @@ public actor CoreMLImageModel {
     /// output tensor matches an NCHW/NHWC RGB image shape.
     public func predict(_ input: ImageBuffer) throws -> ImageBuffer {
         let output = try predictTensor(input)
-        return try makeImageBuffer(from: output)
+        return try ModelTensorConverter.makeImageBuffer(
+            from: output,
+            preservingAlphaFrom: input,
+            spec: spec
+        )
     }
 
     /// Output of a tensor prediction: flat values + shape. Sendable, so it
@@ -192,23 +214,56 @@ public actor CoreMLImageModel {
 
     private static func extractTensor(from outputArray: MLMultiArray) throws -> TensorOutput {
         let shape = outputArray.shape.map { $0.intValue }
-        let total = shape.reduce(1, *)
+        guard !shape.isEmpty, shape.allSatisfy({ $0 > 0 }) else {
+            throw CoreMLModelError.unexpectedOutputType("invalid tensor shape \(shape)")
+        }
+        var total = 1
+        for dimension in shape {
+            let (next, overflow) = total.multipliedReportingOverflow(by: dimension)
+            guard !overflow else {
+                throw CoreMLModelError.unexpectedOutputType("tensor element count overflow for shape \(shape)")
+            }
+            total = next
+        }
         var values = [Float](repeating: 0, count: total)
         let ptr = outputArray.dataPointer
+        let strides = outputArray.strides.map { $0.intValue }
+
+        // Core ML commonly returns a contiguous array, but MLMultiArray also
+        // permits slices and padded strides. Flatten in logical row-major order
+        // in either case instead of assuming dataPointer[i] is always valid.
+        var expectedStride = 1
+        var isContiguous = true
+        for dimension in shape.indices.reversed() {
+            if strides[dimension] != expectedStride { isContiguous = false }
+            expectedStride *= shape[dimension]
+        }
+        @inline(__always)
+        func sourceOffset(for linearIndex: Int) -> Int {
+            guard !isContiguous else { return linearIndex }
+            var remainder = linearIndex
+            var offset = 0
+            for dimension in shape.indices.reversed() {
+                let coordinate = remainder % shape[dimension]
+                remainder /= shape[dimension]
+                offset += coordinate * strides[dimension]
+            }
+            return offset
+        }
 
         switch outputArray.dataType {
         case .float32:
             let typed = ptr.assumingMemoryBound(to: Float32.self)
-            for i in 0..<total { values[i] = typed[i] }
+            for i in 0..<total { values[i] = typed[sourceOffset(for: i)] }
         case .float16:
             let typed = ptr.assumingMemoryBound(to: Float16.self)
-            for i in 0..<total { values[i] = Float(typed[i]) }
+            for i in 0..<total { values[i] = Float(typed[sourceOffset(for: i)]) }
         case .double:
             let typed = ptr.assumingMemoryBound(to: Double.self)
-            for i in 0..<total { values[i] = Float(typed[i]) }
+            for i in 0..<total { values[i] = Float(typed[sourceOffset(for: i)]) }
         case .int32:
             let typed = ptr.assumingMemoryBound(to: Int32.self)
-            for i in 0..<total { values[i] = Float(typed[i]) }
+            for i in 0..<total { values[i] = Float(typed[sourceOffset(for: i)]) }
         default:
             // Deliberately not `@unknown default` with a named `.int8` case:
             // MLMultiArrayDataType.int8 does not exist in the macOS 15 SDK, so
@@ -232,118 +287,200 @@ public actor CoreMLImageModel {
         let dtype: MLMultiArrayDataType = spec.dataType == .float32 ? .float32 : .float16
         let array = try MLMultiArray(shape: shape, dataType: dtype)
 
-        // Capture raw pointer outside the Data closure so the closure doesn't
-        // capture the MLMultiArray (which is non-Sendable). The pointer's
-        // lifetime is bound to `array` which outlives this function.
+        let values = try ModelTensorConverter.makeInputValues(from: buffer, spec: spec)
+
+        // Capture raw pointer so the closure doesn't capture the MLMultiArray
+        // (which is non-Sendable). The pointer is bound to `array`'s lifetime.
         let dstRaw = array.dataPointer
-        let pixelCount = w * h
-        let lowRange = spec.inputRange.0
-        let highRange = spec.inputRange.1
-        let scaleRange = highRange - lowRange
-        let channelOrder: [Int] = spec.channelOrder == .rgb ? [0, 1, 2] : [2, 1, 0]
-        let dataType = spec.dataType
-        let layout = spec.layout
-
-        buffer.pixels.withUnsafeBytes { rawPtr in
-            let src = rawPtr.bindMemory(to: Float16.self).baseAddress!
-
-            switch (dataType, layout) {
-            case (.float32, .nchw):
-                let dst = dstRaw.assumingMemoryBound(to: Float32.self)
-                for c in 0..<3 {
-                    let srcChannel = channelOrder[c]
-                    for p in 0..<pixelCount {
-                        let v = Float(src[p * 4 + srcChannel])
-                        dst[c * pixelCount + p] = lowRange + scaleRange * v
-                    }
-                }
-            case (.float16, .nchw):
-                let dst = dstRaw.assumingMemoryBound(to: Float16.self)
-                for c in 0..<3 {
-                    let srcChannel = channelOrder[c]
-                    for p in 0..<pixelCount {
-                        let v = Float(src[p * 4 + srcChannel])
-                        dst[c * pixelCount + p] = Float16(lowRange + scaleRange * v)
-                    }
-                }
-            case (.float32, .nhwc):
-                let dst = dstRaw.assumingMemoryBound(to: Float32.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = Float(src[p * 4 + srcChannel])
-                        dst[p * 3 + c] = lowRange + scaleRange * v
-                    }
-                }
-            case (.float16, .nhwc):
-                let dst = dstRaw.assumingMemoryBound(to: Float16.self)
-                for p in 0..<pixelCount {
-                    for c in 0..<3 {
-                        let srcChannel = channelOrder[c]
-                        let v = Float(src[p * 4 + srcChannel])
-                        dst[p * 3 + c] = Float16(lowRange + scaleRange * v)
-                    }
-                }
+        switch spec.dataType {
+        case .float32:
+            let destination = dstRaw.assumingMemoryBound(to: Float32.self)
+            values.withUnsafeBufferPointer { source in
+                destination.update(from: source.baseAddress!, count: source.count)
+            }
+        case .float16:
+            let destination = dstRaw.assumingMemoryBound(to: Float16.self)
+            for index in values.indices {
+                destination[index] = Float16(values[index])
             }
         }
 
         return array
     }
+}
 
-    private func makeImageBuffer(from output: TensorOutput) throws -> ImageBuffer {
+// MARK: - Model-free pixel/tensor conversion
+
+/// Pure conversion routines shared by inference and deterministic tests. The
+/// pipeline's working storage is linear-light, premultiplied RGBA; image models
+/// consume and produce straight RGB tensors with an explicit transfer function.
+enum ModelTensorConverter {
+    @inline(__always)
+    static func linearToSRGB(_ value: Float) -> Float {
+        let linear = min(1, max(0, value))
+        if linear <= 0.0031308 { return 12.92 * linear }
+        return 1.055 * pow(linear, 1 / 2.4) - 0.055
+    }
+
+    @inline(__always)
+    static func sRGBToLinear(_ value: Float) -> Float {
+        let nonlinear = min(1, max(0, value))
+        if nonlinear <= 0.04045 { return nonlinear / 12.92 }
+        return pow((nonlinear + 0.055) / 1.055, 2.4)
+    }
+
+    static func makeInputValues(from buffer: ImageBuffer, spec: TensorSpec) throws -> [Float] {
+        guard buffer.format == .working else {
+            throw CoreMLModelError.incompatibleSpec("tensor conversion requires the linear-sRGB working format")
+        }
+        let lowRange = spec.inputRange.0
+        let highRange = spec.inputRange.1
+        guard lowRange.isFinite, highRange.isFinite, lowRange != highRange else {
+            throw CoreMLModelError.incompatibleSpec("input range must contain two distinct finite values")
+        }
+
+        let pixelCount = buffer.width * buffer.height
+        let rangeScale = highRange - lowRange
+        let channelOrder: [Int] = spec.channelOrder == .rgb ? [0, 1, 2] : [2, 1, 0]
+        var values = [Float](repeating: 0, count: pixelCount * 3)
+
+        buffer.pixels.withUnsafeBytes { raw in
+            let source = raw.bindMemory(to: Float16.self).baseAddress!
+            for p in 0..<pixelCount {
+                let alpha = min(1, max(0, Float(source[p * 4 + 3])))
+                let inverseAlpha = alpha > 1e-6 ? 1 / alpha : 0
+                for tensorChannel in 0..<3 {
+                    let sourceChannel = channelOrder[tensorChannel]
+                    let straightLinear = Float(source[p * 4 + sourceChannel]) * inverseAlpha
+                    let normalized: Float = switch spec.inputTransferFunction {
+                    case .linear: min(1, max(0, straightLinear))
+                    case .sRGB: linearToSRGB(straightLinear)
+                    }
+                    let destinationIndex = switch spec.layout {
+                    case .nchw: tensorChannel * pixelCount + p
+                    case .nhwc: p * 3 + tensorChannel
+                    }
+                    values[destinationIndex] = lowRange + normalized * rangeScale
+                }
+            }
+        }
+        return values
+    }
+
+    static func makeImageBuffer(
+        from output: CoreMLImageModel.TensorOutput,
+        preservingAlphaFrom source: ImageBuffer,
+        spec: TensorSpec
+    ) throws -> ImageBuffer {
         let shape = output.shape
         let (h, w): (Int, Int)
         switch spec.layout {
         case .nchw:
-            guard shape.count == 4, shape[1] == 3 else {
+            guard shape.count == 4, shape[0] == 1, shape[1] == 3 else {
                 throw CoreMLModelError.unexpectedOutputType("expected NCHW [1,3,H,W], got \(shape)")
             }
             h = shape[2]; w = shape[3]
         case .nhwc:
-            guard shape.count == 4, shape[3] == 3 else {
+            guard shape.count == 4, shape[0] == 1, shape[3] == 3 else {
                 throw CoreMLModelError.unexpectedOutputType("expected NHWC [1,H,W,3], got \(shape)")
             }
             h = shape[1]; w = shape[2]
         }
+        let (pixelCount, pixelCountOverflow) = w.multipliedReportingOverflow(by: h)
+        let (expectedValueCount, valueCountOverflow) = pixelCount.multipliedReportingOverflow(by: 3)
+        let (rgbaComponentCount, componentCountOverflow) = pixelCount.multipliedReportingOverflow(by: 4)
+        let (outputByteCount, byteCountOverflow) = rgbaComponentCount.multipliedReportingOverflow(
+            by: MemoryLayout<Float16>.size
+        )
+        guard h > 0, w > 0,
+              !pixelCountOverflow, !valueCountOverflow,
+              !componentCountOverflow, !byteCountOverflow,
+              output.values.count == expectedValueCount else {
+            throw CoreMLModelError.unexpectedOutputType(
+                "image tensor shape \(shape) does not match \(output.values.count) values"
+            )
+        }
+        guard source.format == .working else {
+            throw CoreMLModelError.incompatibleSpec("alpha preservation requires the working image format")
+        }
 
-        let pixelCount = w * h
-        var pixels = Data(count: pixelCount * 4 * MemoryLayout<Float16>.size)
+        var pixels = Data(count: outputByteCount)
 
-        let lowRange = spec.inputRange.0
-        let scaleRange = spec.inputRange.1 - lowRange
-        let invScale = scaleRange == 0 ? 1.0 : 1.0 / scaleRange
+        let lowRange = spec.outputRange.0
+        let scaleRange = spec.outputRange.1 - lowRange
+        guard lowRange.isFinite, scaleRange.isFinite, scaleRange != 0 else {
+            throw CoreMLModelError.incompatibleSpec("output range must contain two distinct finite values")
+        }
+        let invScale = 1 / scaleRange
 
         let channelOrder: [Int] = spec.channelOrder == .rgb ? [0, 1, 2] : [2, 1, 0]
         let layout = spec.layout
 
         pixels.withUnsafeMutableBytes { rawPtr in
             let dst = rawPtr.bindMemory(to: Float16.self).baseAddress!
-            output.values.withUnsafeBufferPointer { srcBuf in
-                let src = srcBuf.baseAddress!
+            source.pixels.withUnsafeBytes { sourceRaw in
+                let sourcePixels = sourceRaw.bindMemory(to: Float16.self).baseAddress!
+                output.values.withUnsafeBufferPointer { srcBuf in
+                    let tensor = srcBuf.baseAddress!
 
-                switch layout {
-                case .nchw:
-                    for p in 0..<pixelCount {
-                        for c in 0..<3 {
-                            let srcChannel = channelOrder[c]
-                            let v = (src[srcChannel * pixelCount + p] - lowRange) * invScale
-                            dst[p * 4 + c] = Float16(v)
+                    for y in 0..<h {
+                        for x in 0..<w {
+                            let p = y * w + x
+                            let alpha = resampledAlpha(
+                                x: x, y: y, outputWidth: w, outputHeight: h,
+                                sourceWidth: source.width, sourceHeight: source.height,
+                                sourcePixels: sourcePixels
+                            )
+                            for destinationChannel in 0..<3 {
+                                let tensorChannel = channelOrder[destinationChannel]
+                                let sourceIndex = switch layout {
+                                case .nchw: tensorChannel * pixelCount + p
+                                case .nhwc: p * 3 + tensorChannel
+                                }
+                                let normalized = (tensor[sourceIndex] - lowRange) * invScale
+                                let straightLinear: Float = switch spec.outputTransferFunction {
+                                case .linear: min(1, max(0, normalized))
+                                case .sRGB: sRGBToLinear(normalized)
+                                }
+                                dst[p * 4 + destinationChannel] = Float16(straightLinear * alpha)
+                            }
+                            dst[p * 4 + 3] = Float16(alpha)
                         }
-                        dst[p * 4 + 3] = 1.0  // opaque alpha
-                    }
-                case .nhwc:
-                    for p in 0..<pixelCount {
-                        for c in 0..<3 {
-                            let srcChannel = channelOrder[c]
-                            let v = (src[p * 3 + srcChannel] - lowRange) * invScale
-                            dst[p * 4 + c] = Float16(v)
-                        }
-                        dst[p * 4 + 3] = 1.0
                     }
                 }
             }
         }
 
         return ImageBuffer(width: w, height: h, format: .working, pixels: pixels)
+    }
+
+    /// Bilinear alpha resampling aligns pixel centers. It is exact for scale-1
+    /// restoration and avoids jagged transparency when a model changes size.
+    private static func resampledAlpha(
+        x: Int,
+        y: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        sourcePixels: UnsafePointer<Float16>
+    ) -> Float {
+        let sourceX = (Float(x) + 0.5) * Float(sourceWidth) / Float(outputWidth) - 0.5
+        let sourceY = (Float(y) + 0.5) * Float(sourceHeight) / Float(outputHeight) - 0.5
+        let clampedX = min(Float(sourceWidth - 1), max(0, sourceX))
+        let clampedY = min(Float(sourceHeight - 1), max(0, sourceY))
+        let x0 = Int(clampedX.rounded(.down))
+        let y0 = Int(clampedY.rounded(.down))
+        let x1 = min(sourceWidth - 1, x0 + 1)
+        let y1 = min(sourceHeight - 1, y0 + 1)
+        let fx = clampedX - Float(x0)
+        let fy = clampedY - Float(y0)
+
+        func alpha(_ sampleX: Int, _ sampleY: Int) -> Float {
+            min(1, max(0, Float(sourcePixels[(sampleY * sourceWidth + sampleX) * 4 + 3])))
+        }
+        let top = alpha(x0, y0) + (alpha(x1, y0) - alpha(x0, y0)) * fx
+        let bottom = alpha(x0, y1) + (alpha(x1, y1) - alpha(x0, y1)) * fx
+        return top + (bottom - top) * fy
     }
 }

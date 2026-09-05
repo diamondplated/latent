@@ -28,14 +28,20 @@ enum MediaTyping {
     static let possiblyAnimatedExts: Set<String> = [
         "gif", "png", "heic", "heif", "webp", "avif",
     ]
-    /// Video container extensions. AVFoundation natively handles .mp4 /
-    /// .mov / .m4v / .m4a (audio) plus most HEVC/H.264 in those containers.
-    /// .mkv / .webm / .avi / .flv / .wmv work iff the user has the codecs
-    /// installed (system VideoToolbox + AVFoundation extensions). When
-    /// AVPlayer can't read the file we surface a clear error.
+    /// Video container extensions whose UTIs AVFoundation reports as
+    /// audiovisual types on macOS. Keep this explicit instead of accepting
+    /// every `public.movie` subtype: AVPlayer does not provide a stock
+    /// Matroska/WebM/FLV/WMV/Ogg demuxer, even when VideoToolbox can decode a
+    /// codec carried by one of those containers.
+    ///
+    /// A recognized container can still contain an unsupported codec. In that
+    /// case AVPlayer owns the playback failure and presents its normal error.
     static let videoExts: Set<String> = [
-        "mp4", "mov", "m4v", "qt", "3gp", "3g2",
-        "mkv", "webm", "avi", "flv", "wmv", "ogv", "mts", "m2ts",
+        "mp4", "mpg4", "mov", "qt", "m4v",
+        "3gp", "3gpp", "sdv", "3g2", "3gp2",
+        "avi", "vfw", "mts", "m2ts",
+        "mpg", "mpeg", "mpe", "m75", "m15", "m2v", "ts",
+        "dv", "dif",
     ]
 
     static var allMediaExts: Set<String> {
@@ -58,6 +64,88 @@ enum MediaTyping {
         }
         if staticImageExts.contains(ext) { return .staticImage }
         return .unsupported
+    }
+}
+
+// MARK: - Video keyboard routing
+
+/// Commands the window-level key monitor can send to the currently visible
+/// video without relying on AppKit first-responder focus. `AVPlayerView` only
+/// receives key events after it has been clicked; keeping this tiny weak
+/// registry lets keyboard playback work immediately after j/k navigation while
+/// still leaving every unrelated key with the native responder chain.
+@MainActor
+final class VideoPlaybackRouter {
+    static let shared = VideoPlaybackRouter()
+
+    private weak var playerView: AVPlayerView?
+    private var representedURL: URL?
+
+    private init() {}
+
+    func register(_ playerView: AVPlayerView, url: URL) {
+        self.playerView = playerView
+        representedURL = url
+    }
+
+    func unregister(_ playerView: AVPlayerView) {
+        guard self.playerView === playerView else { return }
+        self.playerView = nil
+        representedURL = nil
+    }
+
+    /// Returns true only when the command was delivered to the player that is
+    /// displaying `url`. The URL check prevents a retiring representable from
+    /// receiving a key during a rapid selection change.
+    @discardableResult
+    func handle(keyCode: UInt16, for url: URL) -> Bool {
+        guard representedURL == url,
+              let player = playerView?.player else { return false }
+
+        switch keyCode {
+        case 49: // Space — play / pause
+            if player.timeControlStatus == .paused {
+                restartIfAtEnd(player)
+                player.play()
+            } else {
+                player.pause()
+            }
+        case 123: // Left — five seconds back
+            seek(player, by: -5)
+        case 124: // Right — five seconds forward
+            seek(player, by: 5)
+        case 125: // Down — volume down
+            player.volume = max(0, player.volume - 0.05)
+        case 126: // Up — volume up
+            player.volume = min(1, player.volume + 0.05)
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func seek(_ player: AVPlayer, by delta: Double) {
+        let current = player.currentTime().seconds
+        guard current.isFinite else { return }
+
+        var target = max(0, current + delta)
+        let duration = player.currentItem?.duration.seconds ?? .nan
+        if duration.isFinite {
+            target = min(target, duration)
+        }
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    private func restartIfAtEnd(_ player: AVPlayer) {
+        let current = player.currentTime().seconds
+        let duration = player.currentItem?.duration.seconds ?? .nan
+        guard current.isFinite, duration.isFinite, duration > 0,
+              current >= duration - 0.05 else { return }
+        player.seek(to: .zero)
     }
 }
 
@@ -93,10 +181,9 @@ struct AnimatedImageView: NSViewRepresentable {
 
 /// SwiftUI wrapper around AVKit's `AVPlayerView`. Auto-plays on appear,
 /// pauses on disappear. Handles the format set AVFoundation supports
-/// natively (mp4/mov/m4v/HEVC/H.264) plus whatever the user has codec
-/// extensions installed for (mkv/webm/avi etc.). When AVPlayer can't
-/// read a file we degrade to a clear error message rather than going
-/// silent.
+/// natively. Container recognition does not guarantee that every codec inside
+/// the container is installed; AVPlayer presents its normal playback error
+/// for those files.
 struct VideoPlaybackView: NSViewRepresentable {
     let url: URL
 
@@ -111,16 +198,19 @@ struct VideoPlaybackView: NSViewRepresentable {
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         let needNew = (nsView.player?.currentItem?.asset as? AVURLAsset)?.url != url
-        guard needNew else { return }
-        let item = AVPlayerItem(url: url)
-        let player = AVPlayer(playerItem: item)
-        nsView.player = player
-        // Auto-play on selection — viewer behavior, not media-app behavior.
-        // The user can still pause from the controls.
-        player.play()
+        if needNew {
+            let item = AVPlayerItem(url: url)
+            let player = AVPlayer(playerItem: item)
+            nsView.player = player
+            // Auto-play on selection — viewer behavior, not media-app behavior.
+            // The user can still pause from the controls.
+            player.play()
+        }
+        VideoPlaybackRouter.shared.register(nsView, url: url)
     }
 
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+        VideoPlaybackRouter.shared.unregister(nsView)
         nsView.player?.pause()
         nsView.player = nil
     }
@@ -133,24 +223,46 @@ struct VideoPlaybackView: NSViewRepresentable {
 /// containers have at t=0. Cached size matches our static-image
 /// thumbnail max so the grid stays consistent.
 enum VideoThumbnail {
+    /// AVAssetImageGenerator does not declare Sendable, but Apple documents
+    /// `cancelAllCGImageGeneration()` as the cancellation entry point for its
+    /// asynchronous requests. This wrapper limits the unchecked crossing to
+    /// that single thread-safe operation.
+    private final class GeneratorCancellation: @unchecked Sendable {
+        let generator: AVAssetImageGenerator
+
+        init(_ generator: AVAssetImageGenerator) {
+            self.generator = generator
+        }
+
+        func cancel() {
+            generator.cancelAllCGImageGeneration()
+        }
+    }
+
     static func generate(url: URL, maxDimension: Int = 256) async -> CGImage? {
-        await Task.detached(priority: .userInitiated) {
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: maxDimension, height: maxDimension)
-            // CMTime: try 1s, but if duration is shorter use 10% of it.
-            // copyCGImage handles errors by returning nil so a video that
-            // can't be decoded just doesn't get a thumbnail.
+        guard !Task.isCancelled else { return nil }
+
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxDimension, height: maxDimension)
+        let cancellation = GeneratorCancellation(generator)
+
+        return await withTaskCancellationHandler {
+            // Try 1s, but if duration is shorter use 10% of it. Any load,
+            // codec, or cancellation failure simply yields no grid thumbnail.
             let durationSec = (try? await asset.load(.duration).seconds) ?? 0
+            guard !Task.isCancelled else { return nil }
             let target = max(0, min(1.0, durationSec * 0.1))
             let time = CMTime(seconds: max(target, durationSec > 1 ? 1 : target), preferredTimescale: 600)
             do {
                 let cg = try await generator.image(at: time).image
-                return cg
+                return Task.isCancelled ? nil : cg
             } catch {
                 return nil
             }
-        }.value
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
 }

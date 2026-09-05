@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var state = AppState()
+    /// Hoisted to the window level so Export Copy remains available through
+    /// Command-S even while its optional side panel is closed.
+    @State private var enhanceState = EnhancementState()
     /// Window-level arrow-key monitor. Lives at the ContentView level so it
     /// installs as soon as the app launches, not only after a folder opens —
     /// otherwise arrow keys do nothing on the first folder you load (the
@@ -11,10 +14,10 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if state.folder == nil {
+            if state.folder == nil && state.loadPhase == nil {
                 EmptyStateView(state: state)
             } else {
-                BrowserView(state: state)
+                BrowserView(state: state, enhanceState: enhanceState)
             }
         }
         .toolbar {
@@ -42,7 +45,7 @@ struct ContentView: View {
         }) {
             PairingSheet(controller: state.phoneAccess, ui: state.phoneAccess.ui)
         }
-        .onAppear { keyMonitor.install(state: state) }
+        .onAppear { keyMonitor.install(state: state, enhancementState: enhanceState) }
         .onDisappear { keyMonitor.uninstall() }
         // Right-click in Finder → "Open With → Latent" delivers the URL
         // here. Works for both folders (open as a folder) and individual

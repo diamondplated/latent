@@ -42,3 +42,14 @@ jobs:
 
       - name: XCTest target
         run: swift test
+
+      - name: Build app bundle
+        run: ./scripts/build_app.sh
+
+      - name: Validate packaged app
+        run: |
+          test -x build/Latent.app/Contents/MacOS/Latent
+          plutil -lint build/Latent.app/Contents/Info.plist
+          plutil -extract CFBundleDocumentTypes xml1 -o /dev/null build/Latent.app/Contents/Info.plist
+          test -n "$(plutil -extract NSLocalNetworkUsageDescription raw -o - build/Latent.app/Contents/Info.plist)"
+          codesign --verify --strict --verbose=2 build/Latent.app

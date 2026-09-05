@@ -52,6 +52,47 @@ public struct EnhanceSidecar: Codable, Sendable {
         self.steps = steps
     }
 
+    /// Return a copy with the supplied stage definitions replacing matching
+    /// stage IDs. Unknown stages keep both their data and relative order, so an
+    /// older Latent build can edit the stages it understands without erasing a
+    /// recipe written by a newer build. Duplicate known-stage entries are
+    /// collapsed to one canonical replacement; replacements absent from the
+    /// original are appended in the order supplied.
+    public func replacingSteps(with replacements: [SidecarStep]) -> EnhanceSidecar {
+        let replacementByID = Dictionary(
+            replacements.map { ($0.stageID, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        let replacementIDs = Set(replacementByID.keys)
+        var emitted = Set<StageID>()
+        var merged: [SidecarStep] = []
+        merged.reserveCapacity(max(steps.count, replacements.count))
+
+        for step in steps {
+            guard replacementIDs.contains(step.stageID) else {
+                merged.append(step)
+                continue
+            }
+            guard emitted.insert(step.stageID).inserted,
+                  let replacement = replacementByID[step.stageID] else {
+                continue
+            }
+            merged.append(replacement)
+        }
+
+        for replacement in replacements {
+            guard emitted.insert(replacement.stageID).inserted,
+                  let canonical = replacementByID[replacement.stageID] else {
+                continue
+            }
+            merged.append(canonical)
+        }
+
+        var copy = self
+        copy.steps = merged
+        return copy
+    }
+
     public static func sidecarURL(for imageURL: URL) -> URL {
         imageURL.appendingPathExtension("enhance.json")
     }

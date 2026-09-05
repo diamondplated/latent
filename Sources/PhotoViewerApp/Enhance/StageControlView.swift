@@ -47,28 +47,30 @@ struct DenoiseControls: View {
                 get: { state.denoiseEnabled },
                 set: { state.denoiseEnabled = $0; state.runPipeline() }
             ))
-            sliderRow(
-                label: "Strength",
-                value: Binding(
-                    get: { state.denoiseParams.strength },
-                    set: { state.denoiseParams.strength = $0 }
-                ),
-                range: 0...1,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
-            sliderRow(
-                label: "Preserve detail",
-                value: Binding(
-                    get: { state.denoiseParams.preserveDetailBias },
-                    set: { state.denoiseParams.preserveDetailBias = $0 }
-                ),
-                range: 0...1,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
+            Group {
+                sliderRow(
+                    label: "Strength",
+                    value: Binding(
+                        get: { state.denoiseParams.strength },
+                        set: { state.denoiseParams.strength = $0 }
+                    ),
+                    range: 0...1,
+                    format: "%.2f",
+                    onCommit: { state.runPipeline() }
+                )
+                sliderRow(
+                    label: "Preserve detail",
+                    value: Binding(
+                        get: { state.denoiseParams.preserveDetailBias },
+                        set: { state.denoiseParams.preserveDetailBias = $0 }
+                    ),
+                    range: 0...1,
+                    format: "%.2f",
+                    onCommit: { state.runPipeline() }
+                )
+            }
+            .disabled(!state.denoiseEnabled)
         }
-        .disabled(!state.denoiseEnabled)
     }
 }
 
@@ -82,44 +84,46 @@ struct UpscaleControls: View {
                 get: { state.upscaleEnabled },
                 set: { state.upscaleEnabled = $0; state.runPipeline() }
             ))
-            HStack {
-                Text("Scale").frame(width: 110, alignment: .leading)
-                // Upscale.Params validates 2 or 4 in its initializer; pick a
-                // segmented Picker so the user can't enter an invalid value.
-                Picker("", selection: Binding(
-                    get: { state.upscaleParams.scale },
-                    set: { state.upscaleParams.scale = $0; state.runPipeline() }
-                )) {
-                    Text("2×").tag(2)
-                    Text("4×").tag(4)
+            Group {
+                HStack {
+                    Text("Scale").frame(width: 110, alignment: .leading)
+                    // Upscale.Params validates 2 or 4 in its initializer; pick a
+                    // segmented Picker so the user can't enter an invalid value.
+                    Picker("Scale", selection: Binding(
+                        get: { state.upscaleParams.scale },
+                        set: { state.upscaleParams.scale = $0; state.runPipeline() }
+                    )) {
+                        Text("2×").tag(2)
+                        Text("4×").tag(4)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
-            HStack {
-                Text("Model").frame(width: 110, alignment: .leading)
-                Picker("", selection: Binding(
-                    get: { state.upscaleParams.model },
-                    set: { state.upscaleParams.model = $0; state.runPipeline() }
-                )) {
-                    Text("Real-ESRGAN x4+").tag(Upscale.Model.realESRGANx4plus)
-                    Text("SwinIR Large").tag(Upscale.Model.swinIRLarge)
+                HStack {
+                    Text("Model").frame(width: 110, alignment: .leading)
+                    Picker("Model", selection: Binding(
+                        get: { state.upscaleParams.model },
+                        set: { state.upscaleParams.model = $0; state.runPipeline() }
+                    )) {
+                        Text("Real-ESRGAN x4+").tag(Upscale.Model.realESRGANx4plus)
+                        Text("SwinIR Large").tag(Upscale.Model.swinIRLarge)
+                    }
+                    .labelsHidden()
                 }
-                .labelsHidden()
+                sliderRow(
+                    label: "Tile size",
+                    value: Binding(
+                        get: { Double(state.upscaleParams.tileSize) },
+                        set: { state.upscaleParams.tileSize = Int($0) }
+                    ),
+                    range: 128...1024,
+                    step: 64,
+                    format: "%.0f",
+                    onCommit: { state.runPipeline() }
+                )
             }
-            sliderRow(
-                label: "Tile size",
-                value: Binding(
-                    get: { Double(state.upscaleParams.tileSize) },
-                    set: { state.upscaleParams.tileSize = Int($0) }
-                ),
-                range: 128...1024,
-                step: 64,
-                format: "%.0f",
-                onCommit: { state.runPipeline() }
-            )
+            .disabled(!state.upscaleEnabled)
         }
-        .disabled(!state.upscaleEnabled)
     }
 }
 
@@ -133,38 +137,40 @@ struct SharpenControls: View {
                 get: { state.sharpenEnabled },
                 set: { state.sharpenEnabled = $0; state.runPipeline() }
             ))
-            sliderRow(
-                label: "Amount",
-                value: Binding(
-                    get: { state.sharpenParams.amount },
-                    set: { state.sharpenParams.amount = $0 }
-                ),
-                range: 0...2,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
-            sliderRow(
-                label: "Radius",
-                value: Binding(
-                    get: { state.sharpenParams.radius },
-                    set: { state.sharpenParams.radius = $0 }
-                ),
-                range: 0.1...10,
-                format: "%.2f",
-                onCommit: { state.runPipeline() }
-            )
-            sliderRow(
-                label: "Threshold",
-                value: Binding(
-                    get: { state.sharpenParams.threshold },
-                    set: { state.sharpenParams.threshold = $0 }
-                ),
-                range: 0...0.5,
-                format: "%.3f",
-                onCommit: { state.runPipeline() }
-            )
+            Group {
+                sliderRow(
+                    label: "Amount",
+                    value: Binding(
+                        get: { state.sharpenParams.amount },
+                        set: { state.sharpenParams.amount = $0 }
+                    ),
+                    range: 0...2,
+                    format: "%.2f",
+                    onCommit: { state.runPipeline() }
+                )
+                sliderRow(
+                    label: "Radius",
+                    value: Binding(
+                        get: { state.sharpenParams.radius },
+                        set: { state.sharpenParams.radius = $0 }
+                    ),
+                    range: 0.1...10,
+                    format: "%.2f",
+                    onCommit: { state.runPipeline() }
+                )
+                sliderRow(
+                    label: "Threshold",
+                    value: Binding(
+                        get: { state.sharpenParams.threshold },
+                        set: { state.sharpenParams.threshold = $0 }
+                    ),
+                    range: 0...0.5,
+                    format: "%.3f",
+                    onCommit: { state.runPipeline() }
+                )
+            }
+            .disabled(!state.sharpenEnabled)
         }
-        .disabled(!state.sharpenEnabled)
     }
 }
 
@@ -192,12 +198,16 @@ fileprivate func sliderRow(
                 step: step,
                 onEditingChanged: { editing in if !editing { onCommit() } }
             )
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(Text(String(format: format, value.wrappedValue)))
         } else {
             Slider(
                 value: value,
                 in: range,
                 onEditingChanged: { editing in if !editing { onCommit() } }
             )
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(Text(String(format: format, value.wrappedValue)))
         }
         Text(String(format: format, value.wrappedValue))
             .font(.system(.caption, design: .monospaced))

@@ -4,24 +4,16 @@ import CoreGraphics
 import PipelineCore
 import PhotoML
 
-/// All stages currently return their input unchanged. The DAG, caching,
-/// progress reporting, and sidecar serialization are exercised end-to-end;
-/// the actual ML inference is the next milestone (CoreML model loading,
-/// tile-based execution).
-///
-/// Each stage's parameters are real and final — adding ML below them does
-/// not change the public surface.
+/// Concrete stages used by the standard enhancement pipeline.
 
 // MARK: - Compression artifact removal (FBCNN)
 
 public struct ArtifactRemoval: Stage {
     public struct Params: StageParameters, Codable {
         public var strength: Double  // 0.0 = bypass-equivalent, 1.0 = max removal
-        public var qualityHint: Int? // pre-computed JPEG quality if known
 
-        public init(strength: Double = 0.7, qualityHint: Int? = nil) {
+        public init(strength: Double = 0.7) {
             self.strength = strength
-            self.qualityHint = qualityHint
         }
     }
 
@@ -30,14 +22,16 @@ public struct ArtifactRemoval: Stage {
     public init() {}
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
-        if params.strength == 0 { return input }
-        return try await runModelOrPassthrough(
+        let strength = normalizedUnitParameter(params.strength)
+        if strength == 0 { return input }
+        let restored = try await runModelOrPassthrough(
             input: input,
             modelID: .artifactRemovalFBCNN,
             spec: .fbcnn,
             tileSize: 256,
             progress: progress
         )
+        return try blendRestoration(original: input, processed: restored, strength: strength)
     }
 }
 
@@ -46,7 +40,7 @@ public struct ArtifactRemoval: Stage {
 public struct Denoise: Stage {
     public struct Params: StageParameters, Codable {
         public var strength: Double          // 0.0 = bypass, 1.0 = max
-        public var preserveDetailBias: Double // 0.0 = clean, 1.0 = preserve grain/detail
+        public var preserveDetailBias: Double // 0.0 = uniform denoise, 1.0 = protect strong edges
 
         public init(strength: Double = 0.6, preserveDetailBias: Double = 0.5) {
             self.strength = strength
@@ -59,13 +53,20 @@ public struct Denoise: Stage {
     public init() {}
 
     public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
-        if params.strength == 0 { return input }
-        return try await runModelOrPassthrough(
+        let strength = normalizedUnitParameter(params.strength)
+        if strength == 0 { return input }
+        let denoised = try await runModelOrPassthrough(
             input: input,
             modelID: .denoiseNAFNet,
             spec: .nafnet,
             tileSize: 256,
             progress: progress
+        )
+        return try blendRestoration(
+            original: input,
+            processed: denoised,
+            strength: strength,
+            preserveDetailBias: normalizedUnitParameter(params.preserveDetailBias)
         )
     }
 }
@@ -173,15 +174,18 @@ public struct Sharpen: Stage {
         defer { progress.report(1.0) }
 
         // Bypass for amount=0 — avoids the CGImage round-trip when stage is a no-op.
-        if params.amount == 0 { return input }
+        let amount = max(0, params.amount.isFinite ? params.amount : 0)
+        if amount == 0 { return input }
+        let radius = max(0, params.radius.isFinite ? params.radius : 0)
+        let threshold = normalizedUnitParameter(params.threshold)
 
         let inputCG = try input.makeCGImage()
         let ciImage = CIImage(cgImage: inputCG)
         // Core Image's unsharp mask: subtracts a Gaussian-blurred copy from
         // the original, scaled by intensity. Standard photographic sharpening.
         let sharpened = ciImage.applyingFilter("CIUnsharpMask", parameters: [
-            kCIInputRadiusKey: params.radius,
-            kCIInputIntensityKey: params.amount,
+            kCIInputRadiusKey: radius,
+            kCIInputIntensityKey: amount,
         ])
         let workingSpace = CGColorSpace(name: CGColorSpace.linearSRGB)!
         let context = CIContext(options: [.workingColorSpace: workingSpace])
@@ -193,8 +197,205 @@ public struct Sharpen: Stage {
         ) else {
             return input
         }
-        return try ImageBuffer.fromCGImage(outCG)
+        let sharpenedBuffer = try ImageBuffer.fromCGImage(outCG)
+        return try applySharpenThreshold(
+            original: input,
+            sharpened: sharpenedBuffer,
+            amount: amount,
+            threshold: threshold
+        )
     }
+}
+
+// MARK: - Pixel mixing
+
+enum EnhancementStageError: Error, CustomStringConvertible {
+    case incompatibleBuffers
+
+    var description: String {
+        switch self {
+        case .incompatibleBuffers:
+            "Enhancement result does not match its input dimensions and format"
+        }
+    }
+}
+
+/// Clamp a user/sidecar value without allowing NaN or infinity into pixel math.
+@inline(__always)
+func normalizedUnitParameter(_ value: Double) -> Double {
+    guard value.isFinite else { return 0 }
+    return min(1, max(0, value))
+}
+
+/// Mix a scale-1 restoration into its source. Working-format pixels are
+/// premultiplied, so interpolating RGB is correct as long as the original alpha
+/// is retained. `preserveDetailBias` protects locally high-contrast pixels,
+/// allowing flat areas to receive full denoising while edges keep more of the
+/// source. A contrast of 0.125 linear-light units or more receives the maximum
+/// requested protection.
+func blendRestoration(
+    original: ImageBuffer,
+    processed: ImageBuffer,
+    strength: Double,
+    preserveDetailBias: Double = 0
+) throws -> ImageBuffer {
+    guard original.width == processed.width,
+          original.height == processed.height,
+          original.format == .working,
+          processed.format == .working else {
+        throw EnhancementStageError.incompatibleBuffers
+    }
+
+    let mixStrength = Float(normalizedUnitParameter(strength))
+    guard mixStrength > 0, original.contentHash != processed.contentHash else {
+        return original
+    }
+    let detailBias = Float(normalizedUnitParameter(preserveDetailBias))
+    let width = original.width
+    let height = original.height
+
+    var output = Data(count: original.pixels.count)
+    original.pixels.withUnsafeBytes { originalRaw in
+        processed.pixels.withUnsafeBytes { processedRaw in
+            output.withUnsafeMutableBytes { outputRaw in
+                let source = originalRaw.bindMemory(to: Float16.self).baseAddress!
+                let result = processedRaw.bindMemory(to: Float16.self).baseAddress!
+                let destination = outputRaw.bindMemory(to: Float16.self).baseAddress!
+
+                // Only three straight-alpha luminance scanlines are needed to
+                // evaluate the four-neighbor contrast below. This preserves the
+                // exact edge metric while avoiding a full Float plane (about
+                // 96 MiB for a 24 MP photo).
+                var previousLuminance = detailBias > 0
+                    ? [Float](repeating: 0, count: width) : []
+                var currentLuminance = detailBias > 0
+                    ? [Float](repeating: 0, count: width) : []
+                var nextLuminance = detailBias > 0
+                    ? [Float](repeating: 0, count: width) : []
+
+                func loadLuminanceRow(_ row: Int, into values: inout [Float]) {
+                    let rowStart = row * width
+                    for x in 0..<width {
+                        let base = (rowStart + x) * 4
+                        let alpha = Float(source[base + 3])
+                        let inverseAlpha = alpha > 1e-6 ? 1 / alpha : 0
+                        let r = Float(source[base]) * inverseAlpha
+                        let g = Float(source[base + 1]) * inverseAlpha
+                        let b = Float(source[base + 2]) * inverseAlpha
+                        values[x] = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                    }
+                }
+
+                if detailBias > 0 {
+                    loadLuminanceRow(0, into: &currentLuminance)
+                    if height > 1 { loadLuminanceRow(1, into: &nextLuminance) }
+                }
+
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let p = y * width + x
+                        var localContrast: Float = 0
+                        if detailBias > 0 {
+                            let center = currentLuminance[x]
+                            if x > 0 {
+                                localContrast = max(localContrast, abs(center - currentLuminance[x - 1]))
+                            }
+                            if x + 1 < width {
+                                localContrast = max(localContrast, abs(center - currentLuminance[x + 1]))
+                            }
+                            if y > 0 {
+                                localContrast = max(localContrast, abs(center - previousLuminance[x]))
+                            }
+                            if y + 1 < height {
+                                localContrast = max(localContrast, abs(center - nextLuminance[x]))
+                            }
+                        }
+                        let edgeProtection = min(1, localContrast / 0.125) * detailBias
+                        let mix = mixStrength * (1 - edgeProtection)
+                        let base = p * 4
+                        for channel in 0..<3 {
+                            let sourceValue = Float(source[base + channel])
+                            let resultValue = Float(result[base + channel])
+                            destination[base + channel] = Float16(
+                                sourceValue + (resultValue - sourceValue) * mix
+                            )
+                        }
+                        // Restoration models operate on RGB only. Alpha is an
+                        // image property, not something they are allowed to alter.
+                        destination[base + 3] = source[base + 3]
+                    }
+
+                    if detailBias > 0, y + 1 < height {
+                        swap(&previousLuminance, &currentLuminance)
+                        swap(&currentLuminance, &nextLuminance)
+                        if y + 2 < height {
+                            loadLuminanceRow(y + 2, into: &nextLuminance)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return ImageBuffer(width: width, height: height, format: .working, pixels: output)
+}
+
+/// Apply an unsharp-mask threshold after Core Image has produced the candidate
+/// sharpened pixels. The comparison uses the underlying (amount-independent)
+/// straight-RGB high-pass magnitude, so changing amount does not silently move
+/// the threshold. Source alpha is always preserved.
+func applySharpenThreshold(
+    original: ImageBuffer,
+    sharpened: ImageBuffer,
+    amount: Double,
+    threshold: Double
+) throws -> ImageBuffer {
+    guard original.width == sharpened.width,
+          original.height == sharpened.height,
+          original.format == .working,
+          sharpened.format == .working else {
+        throw EnhancementStageError.incompatibleBuffers
+    }
+
+    let safeAmount = Float(max(amount.isFinite ? amount : 0, 1e-6))
+    let safeThreshold = Float(normalizedUnitParameter(threshold))
+    let pixelCount = original.width * original.height
+    var output = Data(count: original.pixels.count)
+
+    original.pixels.withUnsafeBytes { originalRaw in
+        sharpened.pixels.withUnsafeBytes { sharpenedRaw in
+            output.withUnsafeMutableBytes { outputRaw in
+                let source = originalRaw.bindMemory(to: Float16.self).baseAddress!
+                let candidate = sharpenedRaw.bindMemory(to: Float16.self).baseAddress!
+                let destination = outputRaw.bindMemory(to: Float16.self).baseAddress!
+
+                for p in 0..<pixelCount {
+                    let base = p * 4
+                    let alpha = Float(source[base + 3])
+                    let inverseAlpha = alpha > 1e-6 ? 1 / alpha : 0
+                    var highPassMagnitude: Float = 0
+                    for channel in 0..<3 {
+                        let difference = abs(
+                            Float(candidate[base + channel]) - Float(source[base + channel])
+                        ) * inverseAlpha / safeAmount
+                        highPassMagnitude = max(highPassMagnitude, difference)
+                    }
+                    let selected = highPassMagnitude >= safeThreshold ? candidate : source
+                    destination[base] = selected[base]
+                    destination[base + 1] = selected[base + 1]
+                    destination[base + 2] = selected[base + 2]
+                    destination[base + 3] = source[base + 3]
+                }
+            }
+        }
+    }
+
+    return ImageBuffer(
+        width: original.width,
+        height: original.height,
+        format: .working,
+        pixels: output
+    )
 }
 
 // MARK: - Default pipeline factory

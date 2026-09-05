@@ -120,6 +120,24 @@ final class VimKeymapTests: XCTestCase {
         XCTAssertTrue(km.isRejected(photoA))
     }
 
+    func testPickingClearsReject() {
+        let km = makeKeymap()
+        _ = km.handle(keyCharacter: "X", modifiers: .shift, currentURL: photoA, currentIndex: 0, totalCount: 10)
+        _ = km.handle(keyCharacter: "P", modifiers: .shift, currentURL: photoA, currentIndex: 0, totalCount: 10)
+
+        XCTAssertTrue(km.isPicked(photoA))
+        XCTAssertFalse(km.isRejected(photoA))
+    }
+
+    func testRejectingClearsPick() {
+        let km = makeKeymap()
+        _ = km.handle(keyCharacter: "P", modifiers: .shift, currentURL: photoA, currentIndex: 0, totalCount: 10)
+        _ = km.handle(keyCharacter: "X", modifiers: .shift, currentURL: photoA, currentIndex: 0, totalCount: 10)
+
+        XCTAssertFalse(km.isPicked(photoA))
+        XCTAssertTrue(km.isRejected(photoA))
+    }
+
     func testPWithoutShiftIsIgnored() {
         let km = makeKeymap()
         let result = km.handle(keyCharacter: "P", modifiers: [], currentURL: photoA, currentIndex: 0, totalCount: 10)
@@ -164,6 +182,26 @@ final class VimKeymapTests: XCTestCase {
         XCTAssertTrue(loaded.marks.isEmpty)
         XCTAssertTrue(loaded.picks.isEmpty)
         XCTAssertTrue(loaded.colorLabels.isEmpty)
+    }
+
+    func testLoadNormalizesLegacyContradictoryFlagsAndInvalidLabels() throws {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vim-legacy-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let stateURL = try VimKeymap.stateFileURL(for: folder)
+        defer { try? FileManager.default.removeItem(at: stateURL) }
+        let legacyJSON = """
+        {"version":1,"folderPath":"\(folder.path)","updatedAt":"2026-01-01T00:00:00Z","marks":{},"colorLabels":{"both.jpg":42},"picks":["both.jpg"],"rejects":["both.jpg"]}
+        """
+        try XCTUnwrap(legacyJSON.data(using: .utf8)).write(to: stateURL, options: .atomic)
+
+        let photo = folder.appendingPathComponent("both.jpg")
+        let loaded = try VimKeymap.load(folder: folder)
+        XCTAssertFalse(loaded.isPicked(photo))
+        XCTAssertTrue(loaded.isRejected(photo))
+        XCTAssertEqual(loaded.colorLabel(for: photo), 0)
     }
 
     func testFutureVersionThrows() throws {

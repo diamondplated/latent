@@ -1,8 +1,8 @@
 import SwiftUI
 import AppKit
 
-/// Window-level NSEvent monitor that routes arrow keys to `AppState`
-/// selection unless the visible enhancement panel needs native key handling.
+/// Window-level NSEvent monitor that routes navigation keys to `AppState`
+/// unless the visible media or enhancement controls need native handling.
 ///
 /// Why this exists: SwiftUI's `.onKeyPress` only fires when the receiving
 /// view (or one of its descendants) has keyboard focus. As soon as the user
@@ -23,11 +23,12 @@ final class NavigationKeyMonitor {
     private var lastEscape: Date?
     private let escapeDoubleTapWindow: TimeInterval = 0.45
 
-    func install(state: AppState) {
+    func install(state: AppState, enhancementState: EnhancementState) {
         guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak state] event in
-            guard let self, let state else { return event }
-            return self.handle(event: event, state: state)
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self, weak state, weak enhancementState] event in
+            guard let self, let state, let enhancementState else { return event }
+            return self.handle(event: event, state: state, enhancementState: enhancementState)
         }
     }
 
@@ -54,7 +55,11 @@ final class NavigationKeyMonitor {
     ///
     /// Modal panels (Open, Save) still bail unconditionally so the user can
     /// arrow-key around the sidebar.
-    private func handle(event: NSEvent, state: AppState) -> NSEvent? {
+    private func handle(
+        event: NSEvent,
+        state: AppState,
+        enhancementState: EnhancementState
+    ) -> NSEvent? {
         // Modal sheets / Open / Save dialogs keep their own keyboard semantics.
         if event.window is NSPanel { return event }
 
@@ -74,8 +79,14 @@ final class NavigationKeyMonitor {
             case 6:  // ⌘Z — undo trash
                 state.undoTrash()
                 return nil
-            case 0:  // ⌘A — select all photos
-                state.selectAllPhotos()
+            case 0:  // ⌘A — select all items visible under the active filter
+                state.selectAllVisible()
+                return nil
+            case 1:  // ⌘S — export the current still, panel open or closed
+                guard !state.isBrowsingArchive,
+                      enhancementState.canEnhanceCurrentMedia,
+                      !enhancementState.isExporting else { return event }
+                Task { await enhancementState.saveEnhanced() }
                 return nil
             default:
                 break
@@ -88,19 +99,57 @@ final class NavigationKeyMonitor {
             return event
         }
 
+        // Video keyboard behavior must not depend on which AppKit/SwiftUI view
+        // currently owns focus. Route only Latent's documented video keys:
+        // j/k always navigate, while Space and arrows drive the active player.
+        // Modified variants pass through to native controls unchanged.
+        if let url = state.currentURL,
+           MediaTyping.detect(url) == .video,
+           !mods.contains(.shift) {
+            // Use produced characters rather than ANSI hardware key codes so
+            // j/k remain semantic shortcuts on non-QWERTY keyboard layouts.
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "j":
+                state.selectNextVisible()
+                return nil
+            case "k":
+                state.selectPreviousVisible()
+                return nil
+            default:
+                break
+            }
+            switch event.keyCode {
+            case 49: // Space — play / pause
+                // Ignore key-repeat for a toggle; a held Space should not flicker
+                // rapidly between playing and paused.
+                if event.isARepeat { return nil }
+                if VideoPlaybackRouter.shared.handle(keyCode: event.keyCode, for: url) {
+                    return nil
+                }
+                return event
+            case 123, 124, 125, 126: // seek / volume
+                if VideoPlaybackRouter.shared.handle(keyCode: event.keyCode, for: url) {
+                    return nil
+                }
+                return event
+            default:
+                break
+            }
+        }
+
         // The enhancement panel contains native sliders and pickers whose
         // standard keyboard interaction uses unmodified arrow keys.
         if state.showEnhancementPanel,
-           [123, 124, 125, 126].contains(event.keyCode) {
+           [49, 123, 124, 125, 126].contains(event.keyCode) {
             return event
         }
 
         switch event.keyCode {
         case 123, 126: // left, up
-            state.selectPrevious()
+            state.selectPreviousVisible()
             return nil
         case 124, 125, 49: // right, down, space — all advance
-            state.selectNext()
+            state.selectNextVisible()
             return nil
         case 51, 117: // delete (backspace), forward delete — trash current
             // No-op if no photo is selected; we still swallow the event so

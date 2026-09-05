@@ -304,9 +304,22 @@ actor PhoneAccessController: ServeDelegate {
             guard let folder = state.folder else { return }
             let root = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
             guard url.path.hasPrefix(root), state.imageURLs.contains(url) else { return }
+            if state.isBrowsingArchive {
+                switch action {
+                case .next, .prev:
+                    break
+                default:
+                    state.lastError = "Archive previews are read-only. Extract the archive before saving culling changes."
+                    return
+                }
+            }
             // Select the photo the phone is looking at, then dispatch. Mutating
             // actions in VimKeymap operate on the current selection, so the
             // selection move is part of applying the action, not a side effect.
+            // Phone sessions address the complete shared folder, so leave any
+            // desktop-only filter before selecting. Otherwise a phone action
+            // can mutate a hidden item while the detail pane shows another.
+            state.photoFilter = .all
             state.select(url: url)
             let vimAction = Self.vimAction(for: action, url: url, keymap: state.vimKeymap)
             state.dispatch(vimAction)
@@ -363,10 +376,20 @@ actor PhoneAccessController: ServeDelegate {
         case .next: return .next
         case .prev: return .prev
         case .pick:
-            if keymap.picks.contains(url) { keymap.picks.remove(url) } else { keymap.picks.insert(url) }
+            if keymap.picks.contains(url) {
+                keymap.picks.remove(url)
+            } else {
+                keymap.picks.insert(url)
+                keymap.rejects.remove(url)
+            }
             return .togglePick
         case .reject:
-            if keymap.rejects.contains(url) { keymap.rejects.remove(url) } else { keymap.rejects.insert(url) }
+            if keymap.rejects.contains(url) {
+                keymap.rejects.remove(url)
+            } else {
+                keymap.rejects.insert(url)
+                keymap.picks.remove(url)
+            }
             return .toggleReject
         case .label0, .label1, .label2, .label3, .label4,
              .label5, .label6, .label7, .label8, .label9:

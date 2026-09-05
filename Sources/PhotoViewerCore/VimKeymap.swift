@@ -62,6 +62,7 @@ public final class VimKeymap {
     /// Bumped when the on-disk format changes in a way older builds can't
     /// safely round-trip. Older code refuses to load a newer file.
     public static let supportedVersion = 1
+    private static var nextSaveRevision: UInt64 = 0
 
     /// Marks (`m<x>` to set, `'<x>` to jump). Stored in memory as URLs;
     /// serialized as relative paths so the JSON is portable across moves
@@ -71,9 +72,9 @@ public final class VimKeymap {
     /// Color label 0-9 per photo URL. Absence == 0 / no label.
     public var colorLabels: [URL: Int] = [:]
 
-    /// Picks and rejects are independent sets — a photo can be neither, but
-    /// the UI typically shouldn't show both simultaneously. The dispatcher
-    /// makes no such guarantee; callers can decide policy.
+    /// Picks and rejects are mutually exclusive. A photo can be neither, but
+    /// marking it as one always clears the other so downstream filters and
+    /// exports never have to resolve contradictory culling state.
     public var picks: Set<URL> = []
     public var rejects: Set<URL> = []
 
@@ -179,6 +180,7 @@ public final class VimKeymap {
                     picks.remove(url)
                 } else {
                     picks.insert(url)
+                    rejects.remove(url)
                 }
                 return .togglePick
             }
@@ -189,6 +191,7 @@ public final class VimKeymap {
                     rejects.remove(url)
                 } else {
                     rejects.insert(url)
+                    picks.remove(url)
                 }
                 return .toggleReject
             }
@@ -270,15 +273,19 @@ public final class VimKeymap {
             picks: picks.map { Self.relativePath(of: $0, under: folder) }.sorted(),
             rejects: rejects.map { Self.relativePath(of: $0, under: folder) }.sorted()
         )
-        // Compute the file URL on main (it needs @MainActor isolation for
-        // the static method), then detach the actual write.
+        // Compute and encode the tiny snapshot on main, then hand the actual
+        // atomic filesystem write to a serialized actor. A monotonically
+        // increasing process-wide revision prevents rapid edits from finishing
+        // out of order and letting an older snapshot replace the newest one.
         guard let url = try? Self.stateFileURL(for: folder) else { return }
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(snapshot) else { return }
+        Self.nextSaveRevision &+= 1
+        let revision = Self.nextSaveRevision
+        Task {
+            await VimStateFileWriter.shared.write(data, to: url, revision: revision)
         }
     }
 
@@ -306,10 +313,15 @@ public final class VimKeymap {
             acc[ch] = folder.appendingPathComponent(kv.value)
         }
         keymap.colorLabels = payload.colorLabels.reduce(into: [:]) { acc, kv in
+            guard (1...9).contains(kv.value) else { return }
             acc[folder.appendingPathComponent(kv.key)] = kv.value
         }
         keymap.picks = Set(payload.picks.map { folder.appendingPathComponent($0) })
         keymap.rejects = Set(payload.rejects.map { folder.appendingPathComponent($0) })
+        // Old files could contain both flags because earlier builds treated the
+        // sets independently. Reject wins during migration so a negatively
+        // culled item can never be mistaken for an accepted pick.
+        keymap.picks.subtract(keymap.rejects)
         return keymap
     }
 
@@ -341,5 +353,18 @@ public final class VimKeymap {
         let colorLabels: [String: Int]       // relative path -> 0-9
         let picks: [String]                  // sorted relative paths
         let rejects: [String]                // sorted relative paths
+    }
+}
+
+/// Serializes background state-file commits and discards a late-arriving write
+/// when a newer snapshot for that same folder has already won the race.
+private actor VimStateFileWriter {
+    static let shared = VimStateFileWriter()
+    private var latestRevision: [URL: UInt64] = [:]
+
+    func write(_ data: Data, to url: URL, revision: UInt64) {
+        guard revision > latestRevision[url, default: 0] else { return }
+        latestRevision[url] = revision
+        try? data.write(to: url, options: .atomic)
     }
 }

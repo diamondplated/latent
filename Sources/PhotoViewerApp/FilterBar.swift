@@ -7,7 +7,7 @@ enum PhotoFilter: Equatable, Hashable, Identifiable {
     case all
     case picked
     case rejected
-    case colorLabel(Int)  // 1-5
+    case colorLabel(Int)  // 1-9
 
     var id: String {
         switch self {
@@ -48,6 +48,10 @@ enum PhotoFilter: Equatable, Hashable, Identifiable {
             case 3: .green
             case 4: .blue
             case 5: .purple
+            case 6: .orange
+            case 7: .cyan
+            case 8: .mint
+            case 9: .pink
             default: .gray
             }
         }
@@ -55,7 +59,7 @@ enum PhotoFilter: Equatable, Hashable, Identifiable {
 }
 
 /// Horizontal filter bar with chips for All, Picked, Rejected, and
-/// color labels 1-5. Filters the grid through the VimKeymap's label/pick/
+/// color labels 1-9. Filters the grid through the VimKeymap's label/pick/
 /// reject data. Appears above the thumbnail grid when the filter is active.
 struct FilterBar: View {
     @Binding var activeFilter: PhotoFilter
@@ -65,14 +69,16 @@ struct FilterBar: View {
     private let filters: [PhotoFilter] = [
         .all, .picked, .rejected,
         .colorLabel(1), .colorLabel(2), .colorLabel(3),
-        .colorLabel(4), .colorLabel(5),
+        .colorLabel(4), .colorLabel(5), .colorLabel(6),
+        .colorLabel(7), .colorLabel(8), .colorLabel(9),
     ]
 
     var body: some View {
+        let counts = filterCounts
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(filters) { filter in
-                    filterChip(filter)
+                    filterChip(filter, count: counts[filter, default: 0])
                 }
             }
             .padding(.horizontal, 8)
@@ -80,9 +86,8 @@ struct FilterBar: View {
         }
     }
 
-    private func filterChip(_ filter: PhotoFilter) -> some View {
+    private func filterChip(_ filter: PhotoFilter, count: Int) -> some View {
         let isActive = activeFilter == filter
-        let count = countForFilter(filter)
 
         return Button {
             activeFilter = filter
@@ -95,6 +100,7 @@ struct FilterBar: View {
                 } else {
                     Image(systemName: filter.symbol)
                         .font(.system(size: 10))
+                        .accessibilityHidden(true)
                 }
                 Text(filter.label)
                     .font(.caption.weight(.medium))
@@ -122,19 +128,29 @@ struct FilterBar: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? filter.chipColor : .secondary)
+        .accessibilityLabel(filter.label)
+        .accessibilityValue(
+            filter == .all
+                ? "\(count) items"
+                : "\(count) matching items"
+        )
+        .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 
-    private func countForFilter(_ filter: PhotoFilter) -> Int {
-        switch filter {
-        case .all:
-            return imageURLs.count
-        case .picked:
-            return imageURLs.filter { vimKeymap.isPicked($0) }.count
-        case .rejected:
-            return imageURLs.filter { vimKeymap.isRejected($0) }.count
-        case .colorLabel(let n):
-            return imageURLs.filter { vimKeymap.colorLabel(for: $0) == n }.count
+    /// Build every chip count in one pass. Large recursive folders can contain
+    /// 100k items; filtering that list once per chip on every keystroke makes a
+    /// tiny status bar disproportionately expensive.
+    private var filterCounts: [PhotoFilter: Int] {
+        var counts: [PhotoFilter: Int] = [.all: imageURLs.count]
+        for url in imageURLs {
+            if vimKeymap.isPicked(url) { counts[.picked, default: 0] += 1 }
+            if vimKeymap.isRejected(url) { counts[.rejected, default: 0] += 1 }
+            let label = vimKeymap.colorLabel(for: url)
+            if (1...9).contains(label) {
+                counts[.colorLabel(label), default: 0] += 1
+            }
         }
+        return counts
     }
 }
 
@@ -153,6 +169,53 @@ extension PhotoFilter {
             return urls.filter { keymap.isRejected($0) }
         case .colorLabel(let n):
             return urls.filter { keymap.colorLabel(for: $0) == n }
+        }
+    }
+}
+
+// MARK: - Filter-aware selection
+
+extension AppState {
+    private var visibleImageURLs: [URL] {
+        photoFilter.apply(to: imageURLs, keymap: vimKeymap)
+    }
+
+    func selectNextVisible() {
+        let urls = visibleImageURLs
+        guard !urls.isEmpty else { return }
+        guard let currentURL,
+              let current = urls.firstIndex(of: currentURL) else {
+            select(url: urls[0])
+            return
+        }
+        select(url: urls[min(current + 1, urls.count - 1)])
+    }
+
+    func selectPreviousVisible() {
+        let urls = visibleImageURLs
+        guard !urls.isEmpty else { return }
+        guard let currentURL,
+              let current = urls.firstIndex(of: currentURL) else {
+            select(url: urls[urls.count - 1])
+            return
+        }
+        select(url: urls[max(current - 1, 0)])
+    }
+
+    func selectFirstVisible() {
+        if let first = visibleImageURLs.first { select(url: first) }
+    }
+
+    func selectLastVisible() {
+        if let last = visibleImageURLs.last { select(url: last) }
+    }
+
+    func selectAllVisible() {
+        let urls = visibleImageURLs
+        guard !urls.isEmpty else { return }
+        multiSelection = Set(urls)
+        if currentURL.map({ !urls.contains($0) }) ?? true {
+            select(url: urls[0])
         }
     }
 }

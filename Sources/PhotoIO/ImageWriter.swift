@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import CoreGraphics
 import CoreImage
 import ImageIO
@@ -8,6 +9,7 @@ import PipelineCore
 public enum ImageWriteError: Error, CustomStringConvertible {
     case destinationCreationFailed(URL)
     case finalizeFailed(URL)
+    case commitFailed(URL, any Error)
     case sourceBufferInvalid(reason: String)
     case formatConversionFailed
     case bridgeError(any Error)
@@ -16,6 +18,7 @@ public enum ImageWriteError: Error, CustomStringConvertible {
         switch self {
         case .destinationCreationFailed(let url): "Could not create destination at \(url.path)"
         case .finalizeFailed(let url): "Failed to finalize destination at \(url.path)"
+        case .commitFailed(let url, let error): "Could not commit export at \(url.path): \(error.localizedDescription)"
         case .sourceBufferInvalid(let r): "Source buffer invalid: \(r)"
         case .formatConversionFailed: "Failed to convert pixel format for destination"
         case .bridgeError(let err): "Image-buffer bridge: \(err)"
@@ -63,6 +66,66 @@ public struct ImageWriteOptions: Sendable {
 /// `preserveMetadata: false` to strip everything for privacy export.
 public struct ImageWriter: Sendable {
     public init() {}
+
+    /// Encode beside the destination and atomically move the completed file
+    /// into place. Existing files are never replaced: if `preferredURL`
+    /// exists, Finder-style numbered siblings (`name 2.ext`, `name 3.ext`, …)
+    /// are tried until one can be claimed.
+    ///
+    /// Encoding to a same-directory temporary file ensures a failed encode
+    /// cannot leave a partial result under the user-visible filename, while
+    /// the final move is an atomic rename on the destination volume.
+    @discardableResult
+    public func writeKeepingBoth(
+        buffer: ImageBuffer,
+        metadata: ImageMetadata?,
+        to preferredURL: URL,
+        options: ImageWriteOptions = ImageWriteOptions()
+    ) throws -> URL {
+        let fileManager = FileManager.default
+        let directory = preferredURL.deletingLastPathComponent()
+        let temporaryURL = directory.appendingPathComponent(
+            ".latent-export-\(UUID().uuidString).tmp",
+            isDirectory: false
+        )
+        defer { try? fileManager.removeItem(at: temporaryURL) }
+
+        try write(buffer: buffer, metadata: metadata, to: temporaryURL, options: options)
+
+        var copyNumber = 1
+        while true {
+            let candidate = Self.keepBothCandidate(for: preferredURL, copyNumber: copyNumber)
+            let result = Self.renameExclusively(from: temporaryURL, to: candidate)
+            if result == 0 {
+                return candidate
+            }
+            if result == EEXIST {
+                // The exclusive rename closes the existence-check race: another
+                // app instance may claim this exact name at any time, but it can
+                // never be replaced by our commit. Retry with the next suffix.
+                copyNumber += 1
+                continue
+            }
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(result))
+            throw ImageWriteError.commitFailed(candidate, error)
+        }
+    }
+
+    /// Atomically rename `source` only if `destination` does not exist. Plain
+    /// POSIX `rename` can replace an existing destination, so a separate
+    /// `fileExists` check is not enough to uphold Export Copy's never-overwrite
+    /// contract when two Latent processes export concurrently.
+    private static func renameExclusively(from source: URL, to destination: URL) -> Int32 {
+        source.withUnsafeFileSystemRepresentation { sourcePath in
+            destination.withUnsafeFileSystemRepresentation { destinationPath in
+                guard let sourcePath, let destinationPath else { return EINVAL }
+                if renamex_np(sourcePath, destinationPath, UInt32(RENAME_EXCL)) == 0 {
+                    return 0
+                }
+                return errno
+            }
+        }
+    }
 
     public func write(
         buffer: ImageBuffer,
@@ -114,6 +177,16 @@ public struct ImageWriter: Sendable {
         guard CGImageDestinationFinalize(destination) else {
             throw ImageWriteError.finalizeFailed(url)
         }
+    }
+
+    private static func keepBothCandidate(for preferredURL: URL, copyNumber: Int) -> URL {
+        guard copyNumber > 1 else { return preferredURL }
+
+        let directory = preferredURL.deletingLastPathComponent()
+        let ext = preferredURL.pathExtension
+        let stem = preferredURL.deletingPathExtension().lastPathComponent
+        let numbered = directory.appendingPathComponent("\(stem) \(copyNumber)", isDirectory: false)
+        return ext.isEmpty ? numbered : numbered.appendingPathExtension(ext)
     }
 
     /// Render the working-format buffer to an 8-bit RGBA CGImage in the

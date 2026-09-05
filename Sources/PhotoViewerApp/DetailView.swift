@@ -20,13 +20,17 @@ struct DetailView: View {
         return state.imageURLs[i]
     }
 
+    private var currentMediaKind: MediaKind? {
+        currentURL.map(MediaTyping.detect)
+    }
+
     var body: some View {
         HSplitView {
             imagePane
                 .frame(minWidth: 320)
             // Enhancement panel is hidden by default — Latent is primarily
             // a viewer. Toolbar button (in BrowserView) toggles it.
-            if state.showEnhancementPanel {
+            if state.showEnhancementPanel && currentMediaKind == .staticImage {
                 EnhancementPanel(state: enhanceState)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
@@ -44,6 +48,9 @@ struct DetailView: View {
             zoom = 1.0
             pan = .zero
         }
+        .onChange(of: state.photoFilter) {
+            updatePrefetchWindow()
+        }
     }
 
     /// Tell the prefetcher to keep the current photo + the ±2 neighbors
@@ -51,12 +58,18 @@ struct DetailView: View {
     /// entry that isn't already there. Cheap (a few set ops + at most
     /// 2-3 task spawns); runs every selection change.
     private func updatePrefetchWindow() {
-        guard let i = state.selectedIndex, i < state.imageURLs.count else {
+        guard let focus = currentURL else {
             state.prefetcher.updateWindow(focus: nil, neighbors: [])
             return
         }
-        let urls = state.imageURLs
-        let focus = urls[i]
+        // Match the active grid filter. Otherwise a Picked-only workflow
+        // spends every speculative decode on hidden files between the items
+        // that j/k and the arrow keys will actually visit.
+        let urls = state.photoFilter.apply(to: state.imageURLs, keymap: state.vimKeymap)
+        guard let i = urls.firstIndex(of: focus) else {
+            state.prefetcher.updateWindow(focus: nil, neighbors: [])
+            return
+        }
         // ±2 neighbors, clamped to bounds. Skip videos / animated images
         // — those don't go through the CGImage decode path so prefetching
         // them would just burn memory on data we won't render via the
@@ -72,12 +85,10 @@ struct DetailView: View {
             }
             if neighbors.count >= radius * 2 { break }
         }
-        // The focus URL may itself be a video/animated; the prefetcher
-        // accepts whatever (it'll just decode + cache, no harm), but we
-        // only schedule a decode for static images. Pass focus through
-        // regardless so a cache HIT for a previously-prefetched static
-        // gets promoted in the LRU.
-        state.prefetcher.updateWindow(focus: focus, neighbors: neighbors)
+        // Full-resolution prefetching is useful only for the static-image
+        // rendering path. Video and animation own their decoding lifecycle.
+        let staticFocus = MediaTyping.detect(focus) == .staticImage ? focus : nil
+        state.prefetcher.updateWindow(focus: staticFocus, neighbors: neighbors)
     }
 
     /// Image area: single pane (enhanced or original), or side-by-side
@@ -87,7 +98,7 @@ struct DetailView: View {
         // GeometryReader so the double-click handler knows the pane's size
         // (needed to convert the click point into a zoom-target offset).
         GeometryReader { geo in
-            ZStack {
+            let base = ZStack {
                 Color.black
                 content
             }
@@ -101,14 +112,27 @@ struct DetailView: View {
             .overlay(alignment: .bottomTrailing) { positionBadge }
             .overlay(alignment: .topTrailing) { showingOriginalBadge }
             .overlay(alignment: .bottom) { zoomHint }
-            .gesture(panGesture)
-            .gesture(magnifyGesture)
-            // Double-tap on a specific point: cycles 1x → 2x → 3x → 4x →
-            // back to fit, recentering on the clicked spot each time.
-            .onTapGesture(count: 2, coordinateSpace: .local) { location in
-                handleDoubleTap(at: location, paneSize: geo.size)
+
+            if supportsZoomInteractions {
+                base
+                    .gesture(panGesture)
+                    .gesture(magnifyGesture)
+                    // Double-tap on a specific point: cycles 1x → 2x → 3x →
+                    // 4x → back to fit, recentering on the clicked spot.
+                    .onTapGesture(count: 2, coordinateSpace: .local) { location in
+                        handleDoubleTap(at: location, paneSize: geo.size)
+                    }
+            } else {
+                // AVPlayer keeps exclusive ownership of its click/drag surface
+                // so transport controls and scrubbing do not compete with the
+                // still-image zoom recognizers.
+                base
             }
         }
+    }
+
+    private var supportsZoomInteractions: Bool {
+        currentMediaKind == .staticImage || currentMediaKind == .animatedImage
     }
 
     /// Cycle through 1× → 2× → 3× → 4× → 1× on each double-click, recentering
@@ -160,7 +184,7 @@ struct DetailView: View {
         // image-only by design (comparing two mid-flight video frames is
         // a different feature) so we still take the image path there.
         switch (enhanceState.displayMode, currentURL.flatMap(MediaTyping.detect)) {
-        case (.sideBySide, _):
+        case (.sideBySide, .staticImage):
             HStack(spacing: 1) {
                 paneView(image: enhanceState.originalDisplayImage, label: "ORIGINAL")
                 Rectangle().fill(Color.gray.opacity(0.4)).frame(width: 1)
@@ -343,7 +367,7 @@ struct DetailView: View {
     private var zoomHint: some View {
         Group {
             let effective = zoom * transientZoom
-            if abs(effective - 1.0) > 0.001 {
+            if supportsZoomInteractions && abs(effective - 1.0) > 0.001 {
                 Text(String(format: "%.2f×", effective))
                     .font(.system(.caption2, design: .monospaced))
                     .padding(.horizontal, 8)
@@ -364,12 +388,34 @@ struct DetailView: View {
 
     @MainActor
     private func loadCurrent() async {
-        guard let url = currentURL else { return }
+        guard let url = currentURL else {
+            // Filters can legitimately produce an empty result set while the
+            // underlying folder still contains media. Clear the previous
+            // image instead of leaving it displayed under a nil selection.
+            enhanceState.reset()
+            return
+        }
+        guard MediaTyping.detect(url) == .staticImage else {
+            // Do not feed videos or animated containers through the still
+            // enhancement pipeline, and do not retain the previous photo's
+            // comparison state while a different media kind is visible.
+            enhanceState.reset()
+            return
+        }
+        if state.isBrowsingArchive {
+            // Archive previews are read-only. They still use the fast static
+            // image loader, but never inherit an enhanced/side-by-side mode
+            // from the folder viewed immediately before the archive.
+            enhanceState.compareMode = .original
+        }
         // Cache hit on the prefetch ring → hand the decoded CGImage
         // straight to EnhancementState, skipping the disk decode entirely.
-        // Miss falls through to the normal preview-decode path.
+        // A miss receives the shared foreground task that updateWindow queued;
+        // if this URL was already a speculative neighbor, that same job is
+        // promoted and awaited rather than decoded twice.
         let cached = state.prefetcher.image(for: url)
-        await enhanceState.loadInput(url: url, prefetched: cached)
+        let previewTask = cached == nil ? state.prefetcher.foregroundDecode(for: url) : nil
+        await enhanceState.loadInput(url: url, prefetched: cached, previewTask: previewTask)
     }
 }
 

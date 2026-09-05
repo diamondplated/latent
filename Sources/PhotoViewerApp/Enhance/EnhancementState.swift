@@ -5,16 +5,178 @@ import PipelineCore
 import EnhancementStages
 import PhotoIO
 
+private enum FullBufferReadOutcome: @unchecked Sendable {
+    case success(ImageBuffer, ImageMetadata)
+    case failure(any Error)
+    case cancelled
+}
+
+/// One-shot result shared when more than one UI action asks for the same full
+/// buffer. The operation resolves this from a worker thread while the editor
+/// awaits it on the main actor.
+private final class FullBufferReadResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcome: FullBufferReadOutcome?
+    private var waiters: [CheckedContinuation<FullBufferReadOutcome, Never>] = []
+
+    func value() async -> FullBufferReadOutcome {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(returning: outcome)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func resolve(_ outcome: FullBufferReadOutcome) {
+        lock.lock()
+        guard self.outcome == nil else {
+            lock.unlock()
+            return
+        }
+        self.outcome = outcome
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        lock.unlock()
+
+        for continuation in pending {
+            continuation.resume(returning: outcome)
+        }
+    }
+}
+
+/// A full-resolution read holds its physical queue permit until the complete
+/// ImageIO + working-buffer conversion returns. Queued reads can be cancelled;
+/// already-running reads remain reusable if their URL quickly becomes current
+/// again.
+private final class FullBufferReadOperation: Operation, @unchecked Sendable {
+    private let url: URL
+    private let reader: ImageReader
+    private let result: FullBufferReadResult
+    private let stateLock = NSLock()
+    private var startedRead = false
+
+    init(url: URL, reader: ImageReader, result: FullBufferReadResult) {
+        self.url = url
+        self.reader = reader
+        self.result = result
+        super.init()
+    }
+
+    override func main() {
+        stateLock.lock()
+        guard !isCancelled else {
+            stateLock.unlock()
+            result.resolve(.cancelled)
+            return
+        }
+        startedRead = true
+        stateLock.unlock()
+
+        do {
+            let (buffer, metadata) = try reader.read(url: url)
+            result.resolve(.success(buffer, metadata))
+        } catch {
+            result.resolve(.failure(error))
+        }
+    }
+
+    func cancelIfQueued() -> Bool {
+        stateLock.lock()
+        guard !startedRead else {
+            stateLock.unlock()
+            return false
+        }
+        super.cancel()
+        stateLock.unlock()
+        result.resolve(.cancelled)
+        return true
+    }
+}
+
+/// Keeps only the newest queued full-buffer request while sharing any existing
+/// job for the same URL. Running synchronous reads cannot be interrupted, so
+/// they remain registered and continue occupying the process-wide decode gate
+/// until return instead of disappearing from concurrency accounting.
+@MainActor
+private final class FullBufferReadCoordinator {
+    private struct Job {
+        let id: UUID
+        let operation: FullBufferReadOperation
+        let resultTask: Task<FullBufferReadOutcome, Never>
+    }
+
+    private let reader = ImageReader()
+    private var jobs: [URL: Job] = [:]
+    private var requestedURL: URL?
+
+    func read(_ url: URL) -> Task<FullBufferReadOutcome, Never> {
+        requestedURL = url
+        cancelQueuedJobs(except: url)
+
+        if let existing = jobs[url] {
+            existing.operation.queuePriority = .veryHigh
+            existing.operation.qualityOfService = .userInitiated
+            return existing.resultTask
+        }
+
+        let id = UUID()
+        let result = FullBufferReadResult()
+        let operation = FullBufferReadOperation(url: url, reader: reader, result: result)
+        operation.queuePriority = .veryHigh
+        operation.qualityOfService = .userInitiated
+        let resultTask = Task.detached(priority: .userInitiated) {
+            await result.value()
+        }
+        jobs[url] = Job(id: id, operation: operation, resultTask: resultTask)
+
+        Task { @MainActor [weak self, resultTask] in
+            _ = await resultTask.value
+            self?.finish(url: url, id: id)
+        }
+        ImageDecodeWorkQueue.shared.addOperation(operation)
+        return resultTask
+    }
+
+    func cancelRequest(for url: URL?) {
+        if url == nil || requestedURL == url {
+            requestedURL = nil
+        }
+        cancelQueuedJobs(except: requestedURL)
+    }
+
+    private func cancelQueuedJobs(except retainedURL: URL?) {
+        let obsolete = jobs.keys.filter { $0 != retainedURL }
+        for url in obsolete {
+            guard let job = jobs[url] else { continue }
+            if job.operation.cancelIfQueued() {
+                jobs.removeValue(forKey: url)
+            }
+        }
+    }
+
+    private func finish(url: URL, id: UUID) {
+        guard jobs[url]?.id == id else { return }
+        jobs.removeValue(forKey: url)
+    }
+}
+
 /// Single source of truth for the in-app enhancement editor.
 ///
 /// Lifecycle:
-///   1. `loadInput(url:)` reads pixels via `ImageReader` and kicks off
-///      the first pipeline run.
-///   2. Any param/enable change calls `runPipeline()` which cancels the
-///      in-flight task and starts a new one. Upstream stages cache-hit on
-///      identical params, so only the changed stage and below recompute.
-///   3. `saveEnhanced()` writes the latest `enhancedBuffer` (or original
-///      if no enhanced result yet) to `<stem>_enhanced.<ext>`.
+///   1. `loadInput(url:)` resets to defaults, restores that image's
+///      `.enhance.json` recipe, then reads pixels via `ImageReader`.
+///   2. Any param/enable change calls `runPipeline()`, which persists the
+///      recipe, cancels the in-flight task, and starts a new one. Upstream
+///      stages cache-hit on identical params, so only the changed stage and
+///      below recompute.
+///   3. `saveEnhanced()` atomically exports the latest `enhancedBuffer` (or
+///      original if no enhanced result yet) to a collision-safe copy beside
+///      the source. The original is never replaced.
 ///
 /// Debounce policy: cancel-on-edit instead of wall-clock debounce. Slider
 /// drags fire many writes; cancellation drops the obsolete tasks before they
@@ -31,18 +193,33 @@ final class EnhancementState {
     // OFF. The user can flip them on later, but `buildSteps()` will still
     // gate on the actual model presence so the pipeline never wastes time
     // running an identity-passthrough.
-    var artifactRemovalEnabled: Bool = false
-    var artifactRemovalParams: ArtifactRemoval.Params = .init()
+    var artifactRemovalEnabled: Bool = false {
+        didSet { recipeSettingDidChange() }
+    }
+    var artifactRemovalParams: ArtifactRemoval.Params = .init() {
+        didSet { recipeSettingDidChange() }
+    }
 
-    var denoiseEnabled: Bool = false
-    var denoiseParams: Denoise.Params = .init()
+    var denoiseEnabled: Bool = false {
+        didSet { recipeSettingDidChange() }
+    }
+    var denoiseParams: Denoise.Params = .init() {
+        didSet { recipeSettingDidChange() }
+    }
 
+    var upscaleEnabled: Bool = true {
+        didSet { recipeSettingDidChange() }
+    }
+    var upscaleParams: Upscale.Params = .init() {
+        didSet { recipeSettingDidChange() }
+    }
 
-    var upscaleEnabled: Bool = true
-    var upscaleParams: Upscale.Params = .init()
-
-    var sharpenEnabled: Bool = true
-    var sharpenParams: Sharpen.Params = .init()
+    var sharpenEnabled: Bool = true {
+        didSet { recipeSettingDidChange() }
+    }
+    var sharpenParams: Sharpen.Params = .init() {
+        didSet { recipeSettingDidChange() }
+    }
 
     // MARK: - Image state
 
@@ -115,6 +292,28 @@ final class EnhancementState {
     private(set) var isProcessing: Bool = false
     /// Last error the pipeline or I/O surfaced; nil if none.
     private(set) var lastError: String? = nil
+    /// Non-fatal recipe persistence problem. Kept separate from processing
+    /// errors so a successful pipeline run cannot erase an important warning
+    /// about a sidecar the app could not read or update.
+    private(set) var recipeWarning: String? = nil
+    /// Destination of the most recent successful export for this image. The
+    /// panel uses it as explicit success feedback instead of making a silent
+    /// filesystem write.
+    private(set) var lastExportedURL: URL? = nil
+    /// True while an export is preparing or committing its output file.
+    private(set) var isExporting: Bool = false
+
+    /// Enhancement recipes apply only to still images. Video and animated
+    /// image playback stay available, but their pixels do not enter this
+    /// image-only pipeline.
+    var canEnhanceCurrentMedia: Bool {
+        currentURL != nil && currentMediaSupportsEnhancements && !isLoadingRecipe
+    }
+
+    /// Reset is useful only after this image differs from Latent's defaults.
+    var canResetRecipe: Bool {
+        canEnhanceCurrentMedia && !recipePersistenceBlocked && !isUsingDefaultRecipe
+    }
 
     // MARK: - Pipeline plumbing
 
@@ -122,8 +321,8 @@ final class EnhancementState {
     /// image doesn't poison hits for the old one. 256 MiB ceiling is enough
     /// for several intermediates of a typical photo at working format.
     let cache = IntermediateCache(maxBytes: 256 * 1024 * 1024)
-    private let reader = ImageReader()
     private let writer = ImageWriter()
+    private let fullBufferReadCoordinator = FullBufferReadCoordinator()
 
     /// In-flight pipeline run, if any. Replaced (and cancelled) on every edit.
     private var pipelineTask: Task<Void, Never>? = nil
@@ -138,16 +337,35 @@ final class EnhancementState {
     private var fullBufferLoadTask: Task<Void, Never>? = nil
     private var fullBufferLoadGeneration: UInt64? = nil
     private var fullBufferLoadURL: URL? = nil
+    /// Sidecar originally loaded for this image. Retained so a save can replace
+    /// known stages while round-tripping stages introduced by newer versions.
+    private var loadedSidecar: EnhanceSidecar? = nil
+    private var recipeDirty = false
+    private var suppressRecipeTracking = false
+    /// Keeps controls disabled while the selected image's recipe is loading,
+    /// preventing a fast edit from being overwritten by a late sidecar read.
+    private(set) var isLoadingRecipe = false
+    /// A sidecar that failed to decode may contain newer top-level data. Do not
+    /// overwrite it merely because this older build changed a slider.
+    private var recipePersistenceBlocked = false
+    private var currentMediaSupportsEnhancements = false
+    private var exportGeneration: UInt64 = 0
 
     init() {}
 
     /// Clear all retained pixel data and cancel in-flight work. Called when
     /// the user closes a folder so 100MB+ of decoded buffers don't linger.
     func reset() {
+        // Capture an in-progress slider edit even if the enclosing view goes
+        // away before SwiftUI delivers its normal on-editing-ended callback.
+        persistRecipeIfNeeded()
         cancelPipeline(clearProcessing: true)
         cancelFullBufferLoad()
         Task { await cache.clear() }
+        exportGeneration &+= 1
+        isExporting = false
         currentURL = nil
+        currentMediaSupportsEnhancements = false
         originalBuffer = nil
         enhancedBuffer = nil
         originalMetadata = nil
@@ -155,6 +373,13 @@ final class EnhancementState {
         originalCGImage = nil
         enhancedCGImage = nil
         lastError = nil
+        recipeWarning = nil
+        lastExportedURL = nil
+        loadedSidecar = nil
+        isLoadingRecipe = false
+        recipePersistenceBlocked = false
+        applyDefaultRecipe()
+        recipeDirty = false
         compareMode = .original
         blinking = false
     }
@@ -173,11 +398,20 @@ final class EnhancementState {
     ///   2. Full buffer: ImageReader.read() does the linear-sRGB float16
     ///      conversion needed by the pipeline. Hundreds of ms — happens in
     ///      the background, then runPipeline() kicks off.
-    func loadInput(url: URL, prefetched: CGImage? = nil) async {
+    func loadInput(
+        url: URL,
+        prefetched: CGImage? = nil,
+        previewTask: Task<CGImage?, Never>? = nil
+    ) async {
         // If the user re-clicks the same URL we're already on, do nothing —
         // avoids a redundant re-decode and pipeline run when the selection
         // change in DetailView fires `.task(id:)` on the same URL.
         if currentURL == url, originalBuffer != nil { return }
+
+        // Navigation can interrupt a slider gesture before its commit
+        // callback. Persist any dirty values against the old URL before the
+        // per-image state below is reset.
+        persistRecipeIfNeeded()
 
         loadGeneration &+= 1
         let myGen = loadGeneration
@@ -185,10 +419,13 @@ final class EnhancementState {
         // Cancel any in-flight work for the previous image.
         cancelPipeline(clearProcessing: true)
         cancelFullBufferLoad()
+        exportGeneration &+= 1
+        isExporting = false
 
         // Never show the previous photo under the new filename/actions. A
         // prefetch hit replaces these immediately; a miss shows a skeleton.
         currentURL = url
+        currentMediaSupportsEnhancements = MediaTyping.detect(url) == .staticImage
         originalBuffer = nil
         enhancedBuffer = nil
         originalMetadata = nil
@@ -196,6 +433,47 @@ final class EnhancementState {
         originalCGImage = nil
         enhancedCGImage = nil
         lastError = nil
+        recipeWarning = nil
+        lastExportedURL = nil
+        loadedSidecar = nil
+        isLoadingRecipe = currentMediaSupportsEnhancements
+        recipePersistenceBlocked = false
+        applyDefaultRecipe()
+        recipeDirty = false
+
+        // AVPlayer/NSImageView own video and animated-image rendering. Reset a
+        // lingering side-by-side comparison here so DetailView can route those
+        // media types correctly, then skip image decoding and recipe I/O.
+        guard currentMediaSupportsEnhancements else {
+            isLoadingRecipe = false
+            compareMode = .original
+            return
+        }
+
+        // Restore this image's recipe before any pipeline run. Decode into
+        // temporary values and commit all settings together so a malformed
+        // known stage cannot leave a half-applied recipe in the UI.
+        do {
+            let sidecar = try await Task.detached(priority: .utility) {
+                try EnhanceSidecar.load(for: url)
+            }.value
+            guard myGen == loadGeneration, currentURL == url else { return }
+            if let sidecar {
+                try apply(sidecar: sidecar)
+                loadedSidecar = sidecar
+            }
+            isLoadingRecipe = false
+        } catch {
+            guard myGen == loadGeneration, currentURL == url else { return }
+            isLoadingRecipe = false
+            applyDefaultRecipe()
+            recipeDirty = false
+            recipePersistenceBlocked = true
+            recipeWarning = "Couldn't read \(url.lastPathComponent).enhance.json. Its saved recipe was left untouched."
+            // Do not silently render defaults as though they were the saved
+            // enhancement the user requested.
+            compareMode = .original
+        }
 
         // Prefetch fast path: caller (the BrowserView selection handler)
         // looked up the prefetcher and passed in a decoded CGImage. Skip
@@ -216,25 +494,22 @@ final class EnhancementState {
         // carries the source file's native color space (Display P3, Adobe
         // RGB, etc.), so passing it straight into SwiftUI's Image view
         // means wide-gamut photos stay in their gamut on capable displays.
-        async let previewTask: CGImage? = Task.detached(priority: .userInitiated) {
-            ImageReader.previewCGImage(url: url)
-        }.value
-
         // Apply the preview first so the UI swaps to the new photo
         // immediately. Same-step nil out the cached CGImages of the
         // previous photo so we don't keep displaying stale content if
         // the preview decode took longer than a vsync.
-        let preview = await previewTask
-        if myGen == loadGeneration {
-            previewCGImage = preview
-            if preview == nil, MediaTyping.detect(url) == .staticImage {
-                lastError = "Couldn't open \(url.lastPathComponent)."
-            }
+        let preview = await previewTask?.value
+        guard !Task.isCancelled,
+              myGen == loadGeneration,
+              currentURL == url else { return }
+        previewCGImage = preview
+        if preview == nil, MediaTyping.detect(url) == .staticImage {
+            lastError = "Couldn't open \(url.lastPathComponent)."
         }
 
         // Phase 2: full pipeline-ready buffer + metadata. Only kick this off
         // when there's a reason to — i.e. the user is in a mode that needs
-        // the enhanced output, OR they're going to need it for Apply & Save.
+        // the enhanced output, OR they're going to need it for Export Copy.
         // For the default browsing case (compareMode = .original), skip the
         // heavy ImageReader.read() + Lanczos+Sharpen entirely so nav is free.
         if compareMode != .original {
@@ -266,20 +541,11 @@ final class EnhancementState {
         fullBufferLoadGeneration = myGen
         fullBufferLoadURL = url
 
-        let task = Task.detached(priority: .userInitiated) { [weak self, reader] in
+        let readTask = fullBufferReadCoordinator.read(url)
+        let task = Task { @MainActor [weak self, readTask] in
+            let outcome = await readTask.value
             guard !Task.isCancelled else { return }
-            let result: Result<(ImageBuffer, ImageMetadata), Error>
-            do {
-                let pair = try reader.read(url: url)
-                result = .success(pair)
-            } catch {
-                result = .failure(error)
-            }
-
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.applyFullBufferLoadResult(result, url: url, generation: myGen)
-            }
+            self?.applyFullBufferLoadOutcome(outcome, url: url, generation: myGen)
         }
         fullBufferLoadTask = task
         await task.value
@@ -289,6 +555,7 @@ final class EnhancementState {
     /// heavy buffer load + pipeline if we don't already have an enhanced
     /// result for the current photo.
     func ensureEnhancedAvailable() {
+        guard canEnhanceCurrentMedia else { return }
         guard let url = currentURL else { return }
         guard enhancedBuffer == nil else { return }
 
@@ -307,6 +574,12 @@ final class EnhancementState {
     /// If the heavy decode hasn't run yet (lazy default), kick that off
     /// first; the pipeline runs as a continuation when it lands.
     func runPipeline() {
+        // UI controls mutate their value first and call runPipeline on commit.
+        // Persist that exact recipe before starting expensive work; automatic
+        // runs after image load leave `recipeDirty == false` and do no I/O.
+        persistRecipeIfNeeded()
+
+        guard canEnhanceCurrentMedia else { return }
         guard let url = currentURL else { return }
         guard let input = originalBuffer else {
             // Lazy load the buffer first — runPipeline is normally chained
@@ -322,7 +595,8 @@ final class EnhancementState {
 
         pipelineGeneration &+= 1
         let myPipelineGen = pipelineGeneration
-        pipelineTask?.cancel()
+        let previousTask = pipelineTask
+        previousTask?.cancel()
         let steps = buildSteps()
         let pipeline = Pipeline(steps: steps, cache: cache)
         let myGen = loadGeneration
@@ -332,38 +606,63 @@ final class EnhancementState {
         enhancedBuffer = nil
         enhancedCGImage = nil
 
-        pipelineTask = Task { [weak self] in
-            // Run off the main actor — Pipeline.run is async but the
-            // CoreImage / ML work inside stages benefits from being
-            // detached so SwiftUI binding writes don't queue behind it.
-            let runResult: Result<ImageBuffer, Error> = await Task.detached(priority: .userInitiated) {
-                do {
-                    let out = try await pipeline.run(input: input)
-                    return .success(out)
-                } catch {
-                    return .failure(error)
-                }
-            }.value
+        // Store the actual detached worker, not a main-actor wrapper around
+        // it. Cancelling `pipelineTask` now reaches Pipeline.run and its tile
+        // loop instead of merely abandoning a task that continues inference.
+        // Wait for the cancelled predecessor so synchronous Core ML calls do
+        // not overlap while an older prediction finishes draining.
+        pipelineTask = Task.detached(priority: .userInitiated) { [weak self] in
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            let runResult: Result<ImageBuffer, Error>
+            do {
+                runResult = .success(try await pipeline.run(input: input))
+            } catch {
+                runResult = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
 
-            guard let self else { return }
-            // Drop the result if the user moved on to a different image or
-            // started a newer pipeline run for the same image.
-            guard self.matchesGeneration(myGen),
-                  self.matchesPipelineGeneration(myPipelineGen) else { return }
-            self.applyPipelineResult(runResult, pipelineGeneration: myPipelineGen)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                // Drop the result if the user moved on to a different image or
+                // started a newer pipeline run for the same image.
+                guard self.matchesGeneration(myGen),
+                      self.matchesPipelineGeneration(myPipelineGen) else { return }
+                self.applyPipelineResult(runResult, pipelineGeneration: myPipelineGen)
+            }
         }
     }
 
     /// Write `enhancedBuffer` (falling back to `originalBuffer`) next to the
-    /// source as `<stem>_enhanced.<ext>`. Overwrites if the destination
-    /// already exists.
+    /// source as `<stem>_enhanced.<ext>`. The writer encodes to a temporary
+    /// sibling, then atomically claims the first free Keep Both filename; the
+    /// original and any previous exports are never replaced.
     func saveEnhanced() async {
         guard let url = currentURL else {
             lastError = "Nothing to save."
             return
         }
+        guard canEnhanceCurrentMedia else {
+            lastExportedURL = nil
+            lastError = "Enhancement export is available for still images only."
+            return
+        }
+        guard !isExporting else { return }
+
+        persistRecipeIfNeeded()
+        exportGeneration &+= 1
+        let myExportGeneration = exportGeneration
+        isExporting = true
+        lastExportedURL = nil
+        lastError = nil
+        defer {
+            if exportGeneration == myExportGeneration {
+                isExporting = false
+            }
+        }
+
         let savingGeneration = loadGeneration
-        // Lazy-load the heavy buffer if we don't have it yet. Apply & Save
+        // Lazy-load the heavy buffer if we don't have it yet. Export Copy
         // works even when the user has been browsing in .original mode.
         if originalBuffer == nil {
             await loadFullBuffer(url: url, generation: savingGeneration)
@@ -381,13 +680,17 @@ final class EnhancementState {
             return
         }
         let metadata = originalMetadata
-        let dest = Self.outputURL(for: url, sourceFormat: metadata?.sourceFormat)
+        let preferredDestination = Self.outputURL(for: url, sourceFormat: metadata?.sourceFormat)
         let writer = self.writer
 
-        let writeResult: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+        let writeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
             do {
-                try writer.write(buffer: buffer, metadata: metadata, to: dest)
-                return .success(())
+                let destination = try writer.writeKeepingBoth(
+                    buffer: buffer,
+                    metadata: metadata,
+                    to: preferredDestination
+                )
+                return .success(destination)
             } catch {
                 return .failure(error)
             }
@@ -395,14 +698,16 @@ final class EnhancementState {
 
         guard currentURL == url, loadGeneration == savingGeneration else { return }
         switch writeResult {
-        case .success:
+        case .success(let destination):
             lastError = nil
+            lastExportedURL = destination
         case .failure(let error):
+            lastExportedURL = nil
             lastError = "Save failed: \(error.localizedDescription)"
         }
     }
 
-    /// Output URL for `Apply & Save`: `<dir>/<stem>_enhanced.<ext>`. Keeps the
+    /// Preferred URL for `Export Copy`: `<dir>/<stem>_enhanced.<ext>`. Keeps the
     /// file in the source folder so the existing folder watcher picks it up.
     static func outputURL(for source: URL, sourceFormat: ImageFileFormat?) -> URL {
         let dir = source.deletingLastPathComponent()
@@ -414,7 +719,145 @@ final class EnhancementState {
         return dir.appendingPathComponent("\(stem)_enhanced.\(ext)")
     }
 
+    /// Restore Latent's standard stage settings for the current still image
+    /// and persist that reset as this image's recipe. Unknown future stages in
+    /// the sidecar remain intact.
+    func resetEnhancements() {
+        guard canResetRecipe else { return }
+        applyDefaultRecipe()
+        recipeDirty = true
+        lastExportedURL = nil
+        runPipeline()
+    }
+
     // MARK: - Private
+
+    /// True while defaults or a sidecar are being applied programmatically.
+    /// Property observers otherwise cannot distinguish that work from a user
+    /// dragging a slider.
+    private func withRecipeTrackingSuppressed(_ body: () -> Void) {
+        let wasSuppressed = suppressRecipeTracking
+        suppressRecipeTracking = true
+        body()
+        suppressRecipeTracking = wasSuppressed
+    }
+
+    private func applyDefaultRecipe() {
+        withRecipeTrackingSuppressed {
+            artifactRemovalEnabled = false
+            artifactRemovalParams = .init()
+            denoiseEnabled = false
+            denoiseParams = .init()
+            upscaleEnabled = true
+            upscaleParams = .init()
+            sharpenEnabled = true
+            sharpenParams = .init()
+        }
+    }
+
+    private func apply(sidecar: EnhanceSidecar) throws {
+        // Decode first, commit second. A damaged parameter bag should not mix
+        // values from the sidecar with defaults from this build.
+        var artifactEnabled = false
+        var artifactParams = ArtifactRemoval.Params()
+        var denoiseIsEnabled = false
+        var denoiseParameters = Denoise.Params()
+        var upscaleIsEnabled = true
+        var upscaleParameters = Upscale.Params()
+        var sharpenIsEnabled = true
+        var sharpenParameters = Sharpen.Params()
+
+        for step in sidecar.steps {
+            switch step.stageID {
+            case "artifact-removal-fbcnn":
+                artifactEnabled = step.enabled
+                artifactParams = try step.parameters.decode(as: ArtifactRemoval.Params.self)
+            case "denoise-nafnet":
+                denoiseIsEnabled = step.enabled
+                denoiseParameters = try step.parameters.decode(as: Denoise.Params.self)
+            case "upscale":
+                upscaleIsEnabled = step.enabled
+                upscaleParameters = try step.parameters.decode(as: Upscale.Params.self)
+            case "sharpen-unsharp-mask":
+                sharpenIsEnabled = step.enabled
+                sharpenParameters = try step.parameters.decode(as: Sharpen.Params.self)
+            default:
+                continue
+            }
+        }
+
+        withRecipeTrackingSuppressed {
+            artifactRemovalEnabled = artifactEnabled
+            artifactRemovalParams = artifactParams
+            denoiseEnabled = denoiseIsEnabled
+            denoiseParams = denoiseParameters
+            upscaleEnabled = upscaleIsEnabled
+            upscaleParams = upscaleParameters
+            sharpenEnabled = sharpenIsEnabled
+            sharpenParams = sharpenParameters
+        }
+        recipeDirty = false
+    }
+
+    private func recipeSettingDidChange() {
+        guard !suppressRecipeTracking else { return }
+        recipeDirty = true
+        lastExportedURL = nil
+    }
+
+    private var isUsingDefaultRecipe: Bool {
+        !artifactRemovalEnabled
+            && artifactRemovalParams == ArtifactRemoval.Params()
+            && !denoiseEnabled
+            && denoiseParams == Denoise.Params()
+            && upscaleEnabled
+            && upscaleParams == Upscale.Params()
+            && sharpenEnabled
+            && sharpenParams == Sharpen.Params()
+    }
+
+    private func persistRecipeIfNeeded() {
+        guard recipeDirty,
+              let url = currentURL,
+              currentMediaSupportsEnhancements else { return }
+        guard !recipePersistenceBlocked else {
+            recipeWarning = "This image's saved recipe was created by an unsupported or damaged sidecar and was not overwritten."
+            return
+        }
+
+        do {
+            let knownSteps: [EnhanceSidecar.SidecarStep] = [
+                .init(
+                    stageID: "artifact-removal-fbcnn",
+                    enabled: artifactRemovalEnabled,
+                    parameters: try ParameterBag(artifactRemovalParams)
+                ),
+                .init(
+                    stageID: "denoise-nafnet",
+                    enabled: denoiseEnabled,
+                    parameters: try ParameterBag(denoiseParams)
+                ),
+                .init(
+                    stageID: "upscale",
+                    enabled: upscaleEnabled,
+                    parameters: try ParameterBag(upscaleParams)
+                ),
+                .init(
+                    stageID: "sharpen-unsharp-mask",
+                    enabled: sharpenEnabled,
+                    parameters: try ParameterBag(sharpenParams)
+                ),
+            ]
+            let base = loadedSidecar ?? EnhanceSidecar()
+            let updated = base.replacingSteps(with: knownSteps)
+            try updated.save(for: url)
+            loadedSidecar = updated
+            recipeDirty = false
+            recipeWarning = nil
+        } catch {
+            recipeWarning = "Couldn't save the enhancement recipe for \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
 
     private func matchesGeneration(_ gen: UInt64) -> Bool {
         gen == loadGeneration
@@ -434,14 +877,15 @@ final class EnhancementState {
     }
 
     private func cancelFullBufferLoad() {
+        fullBufferReadCoordinator.cancelRequest(for: fullBufferLoadURL)
         fullBufferLoadTask?.cancel()
         fullBufferLoadTask = nil
         fullBufferLoadGeneration = nil
         fullBufferLoadURL = nil
     }
 
-    private func applyFullBufferLoadResult(
-        _ result: Result<(ImageBuffer, ImageMetadata), Error>,
+    private func applyFullBufferLoadOutcome(
+        _ outcome: FullBufferReadOutcome,
         url: URL,
         generation myGen: UInt64
     ) {
@@ -454,8 +898,8 @@ final class EnhancementState {
 
         guard myGen == loadGeneration, currentURL == url else { return }
 
-        switch result {
-        case .success(let (buffer, metadata)):
+        switch outcome {
+        case .success(let buffer, let metadata):
             originalBuffer = buffer
             originalMetadata = metadata
             // Render the working-format buffer once and cache it. Falls back
@@ -465,6 +909,8 @@ final class EnhancementState {
         case .failure(let error):
             guard !Self.isCancellation(error) else { return }
             lastError = "Read failed: \(error.localizedDescription)"
+        case .cancelled:
+            return
         }
     }
 

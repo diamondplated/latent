@@ -31,12 +31,13 @@ struct PipelineCLI {
         failures += await runVerification("sidecar load rejects newer schema versions", check: sidecarRejectsNewerVersion)
         failures += await runVerification("LRU eviction drops least-recently-used entry", check: lruEviction)
         failures += await runVerification("image I/O round-trips a JPEG through reader+writer", check: jpegRoundTrip)
+        failures += await runVerification("Export Copy atomically keeps concurrent results", check: concurrentExportsKeepBoth)
         failures += await runVerification("reader bakes EXIF orientation into pixels (axes swap for orientation 6)", check: orientationBaking)
         failures += await runVerification("writer with preserveMetadata=false strips EXIF", check: privacyExportStripsMetadata)
         failures += await runVerification("TileExecutor single-tile fast path is exact identity", check: tileExecutorSingleTile)
         failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
         failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
-            failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
+        failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
         failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
         failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
         failures += await runVerification("CLIPBPETokenizer init from minimal merges file produces 77-token output with SOS/EOS", check: tokenizerSmokeTest)
@@ -99,6 +100,8 @@ struct PipelineCLI {
         failures += await runVerification("ArchiveExtractor: detects zip / tar / tar.gz / tar.bz2 / tar.xz from filename", check: archiveDetectsCommonFormats)
         failures += await runVerification("ArchiveExtractor: extracts a real zip, preserving subfolder structure", check: archiveExtractRoundTripZip)
         failures += await runVerification("ArchiveExtractor: rejects unsupported extensions", check: archiveExtractRejectsBadFormat)
+        failures += await runVerification("ArchiveExtractor: rejects symlinks that escape the extraction root", check: archiveRejectsEscapingSymlink)
+        failures += await runVerification("ArchiveExtractor: enforces expanded-file resource limits", check: archiveRejectsExpandedFileOverLimit)
 
         // Optional: real-photo smoke test. Set PV_TEST_FOLDER=/some/path with
         // real JPEG/HEIC/PNG to exercise the full pipeline end-to-end on
@@ -397,6 +400,37 @@ func jpegRoundTrip() async throws {
     try require(buf2.width == 128 && buf2.height == 96,
                 "round-tripped dimensions wrong: \(buf2.width)x\(buf2.height)")
     try require(meta2.sourceFormat == .jpeg, "round-tripped format not JPEG")
+}
+
+func concurrentExportsKeepBoth() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("latent-concurrent-export-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let preferred = directory.appendingPathComponent("photo_enhanced.jpg")
+    let buffer = makeGradientBuffer(width: 8, height: 8)
+    let writer = ImageWriter()
+    let destinations = try await withThrowingTaskGroup(of: URL.self) { group in
+        for _ in 0..<4 {
+            group.addTask {
+                try writer.writeKeepingBoth(buffer: buffer, metadata: nil, to: preferred)
+            }
+        }
+        var urls: [URL] = []
+        for try await url in group { urls.append(url) }
+        return urls
+    }
+
+    try require(Set(destinations).count == 4, "concurrent exports reused a destination")
+    let names = Set(destinations.map(\.lastPathComponent))
+    try require(
+        names == ["photo_enhanced.jpg", "photo_enhanced 2.jpg", "photo_enhanced 3.jpg", "photo_enhanced 4.jpg"],
+        "unexpected Keep Both filenames: \(names.sorted())"
+    )
+    for destination in destinations {
+        try require(FileManager.default.fileExists(atPath: destination.path), "missing export \(destination.lastPathComponent)")
+    }
 }
 
 func orientationBaking() async throws {

@@ -10,8 +10,9 @@ share — format, rough dimensions, and where it came from is usually enough to 
 
 ## What Latent is, from a security standpoint
 
-A local, single-user Mac app that reads image files from folders you point it at. There is no
-account, no sync, no server, and no telemetry.
+A local, single-user Mac app that reads image files from folders you point it at. There is no cloud
+account, remote sync, hosted backend, or telemetry. The optional phone companion starts a temporary
+LAN-only server only when you switch it on.
 
 **No runtime network calls by default.** Out of the box the running app does not contact anything.
 Three things can touch the network, and all three are things you ask for:
@@ -37,8 +38,8 @@ Three things can touch the network, and all three are things you ask for:
   Trash and can be restored. Nothing in the culling flow permanently deletes a photo.
 - **Export can strip metadata.** `preserveMetadata: false` removes EXIF on write. That is a privacy
   feature, not an oversight — photos carry GPS coordinates.
-- **Enhancement is non-destructive.** Results are written to `.enhance.json` sidecars; the original
-  file is not modified.
+- **Enhancement is non-destructive.** Recipes are written to `.enhance.json` sidecars. Export Copy
+  atomically creates a collision-safe sibling and never replaces the original or an earlier export.
 - **Archive extraction is contained.** Archives are extracted into a fresh temporary directory, not
   into the folder being browsed, and the temp directory is removed if extraction fails.
 
@@ -50,14 +51,14 @@ patched. Latent adds no image parser of its own.
 
 **Archive extraction shells out to external tools.** `ArchiveExtractor` runs `/usr/bin/unzip` and
 `/usr/bin/tar` for zip and tar formats, using `Process` with argument arrays — there is no shell, so
-a hostile filename cannot inject a command. Protection against path traversal (`../` entries) comes
-from those tools' own behaviour rather than from a check in Latent; extraction into a private temp
-directory is the containment.
+a hostile filename cannot inject a command. Latent preflights member names, rejects absolute and
+parent-traversal paths, monitors count and expanded-size ceilings during extraction, enforces a
+timeout, and validates the finished tree (including symbolic links) before showing it. Failed or
+cancelled extractions are removed from their private, mode-0700 temporary directory.
 
-For `.rar` and `.7z`, Latent looks for `unrar` / `7zz` in the standard Homebrew and MacPorts
-prefixes and then falls back to resolving the name on your `PATH`. That means it will execute a
-binary found on your `PATH` by name. That is your `PATH` and your machine, but if you keep untrusted
-directories on it, be aware.
+For `.rar` and `.7z`, Latent accepts `unrar` / `7zz` only from fixed Homebrew and MacPorts prefixes;
+it does not execute an arbitrary same-named binary earlier on `PATH`. Helper processes receive a
+fixed search path with implicit archive-tool and dynamic-loader option variables removed.
 
 **Model weights are checksum-pinned.** Every conversion script that can download its own weights
 verifies them against a SHA256 recorded in the script before `torch.load` ever sees the file

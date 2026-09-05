@@ -12,21 +12,21 @@ enum BrowseMode: String, CaseIterable, Identifiable {
 
 struct BrowserView: View {
     @Bindable var state: AppState
-    @State private var thumbnailSize: CGFloat = 160
+    /// Owned by ContentView so window-level Command-S can export even while
+    /// the optional panel is not in the view hierarchy.
+    @Bindable var enhanceState: EnhancementState
+    @AppStorage("thumbnailSize") private var thumbnailSize: Double = 160
     @State private var locationCache = PhotoLocationCache()
     @State private var mode: BrowseMode = .grid
     @State private var showShortcutOverlay = false
     @FocusState private var viewerFocused: Bool
-    /// Hoisted from DetailView so the keypress handler here can drive blink
-    /// state (B key down/up) and so the cache survives across mode switches.
-    @State private var enhanceState = EnhancementState()
 
     var body: some View {
         HSplitView {
             // Far-left pane: folder tree (collapsible). Default off — toggled
             // from the toolbar — so the layout stays simple unless the user
             // wants to drill around a parent dir.
-            if state.showFolderTree {
+            if state.showFolderTree && !state.isBrowsingArchive {
                 FolderTreeView(state: state)
                     .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
             }
@@ -58,6 +58,7 @@ struct BrowserView: View {
                 }
                 .help(state.showFolderTree ? "Hide folder tree" : "Show folder tree")
                 .keyboardShortcut("l", modifiers: .command)
+                .disabled(state.isBrowsingArchive)
             }
             // Cmd-Up jumps to the parent dir, Finder-style. Re-roots the
             // folder tree on the parent so you can drill back down a
@@ -101,6 +102,18 @@ struct BrowserView: View {
                 photoSortMenu
             }
             ToolbarItem(placement: .primaryAction) {
+                HStack(spacing: 5) {
+                    Image(systemName: "rectangle.grid.2x2")
+                        .foregroundStyle(.secondary)
+                    Slider(value: $thumbnailSize, in: 96...256, step: 16) {
+                        Text("Thumbnail size")
+                    }
+                    .frame(width: 88)
+                }
+                .help("Thumbnail size")
+                .disabled(mode != .grid || state.imageURLs.isEmpty)
+            }
+            ToolbarItem(placement: .primaryAction) {
                 photoCounter
             }
             ToolbarItem(placement: .primaryAction) {
@@ -113,6 +126,7 @@ struct BrowserView: View {
                 }
                 .help(state.showEnhancementPanel ? "Hide enhancement panel" : "Show enhancement panel")
                 .keyboardShortcut("e", modifiers: .command)
+                .disabled(!canEnhanceCurrent)
             }
         }
         // Folder switch hooks.
@@ -134,6 +148,7 @@ struct BrowserView: View {
                     state.lastError = "Couldn't read the saved picks and labels for this folder, so it's starting fresh."
                 }
             }
+            state.photoFilter = .all
             // Forget GPS cache for the previous folder. We'll lazy-rebuild
             // when the user actually opens the map view.
             locationCache.reset()
@@ -142,7 +157,13 @@ struct BrowserView: View {
         // (header reads on every photo) — only kick it off when the user
         // actually wants the map view, not on every folder open.
         .onChange(of: mode) { _, newMode in
-            if newMode == .map { Task { await locationCache.locate(state.imageURLs) } }
+            if newMode == .map {
+                // Map currently represents the whole opened folder. Clear a
+                // grid-only culling filter so a cluster cannot select an item
+                // that is hidden when the UI returns to the grid.
+                state.photoFilter = .all
+                Task { await locationCache.locate(state.imageURLs) }
+            }
         }
         // If the user opens a folder while ALREADY in map mode, fire the
         // first GPS pass once the scan settles. Watch isLoading rather than
@@ -152,7 +173,13 @@ struct BrowserView: View {
                 Task { await locationCache.locate(state.imageURLs) }
             }
         }
-        .onChange(of: state.selectedIndex) { viewerFocused = true }
+        .onChange(of: filteredURLs) { _, urls in
+            reconcileSelection(with: urls)
+        }
+        .onChange(of: state.selectedIndex) {
+            viewerFocused = true
+            if !canEnhanceCurrent { state.showEnhancementPanel = false }
+        }
         .onAppear { viewerFocused = true }
         .onDisappear { enhanceState.reset() }
     }
@@ -163,23 +190,66 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var sidebar: some View {
-        ZStack {
-            // Don't render the actual grid / map while scanning. SwiftUI
-            // would otherwise diff a ForEach over a 1000-item array on
-            // every batch update from the streaming scan, which spikes the
-            // main thread (rainbow spinner). Show only the loading scene
-            // until the scan settles.
-            if state.isLoading {
-                loadingOverlay
-            } else if state.imageURLs.isEmpty && state.folder != nil {
-                emptyFolderHint
-            } else {
-                switch mode {
-                case .grid: thumbnailGrid
-                case .map:  mapView
+        VStack(spacing: 0) {
+            if state.isBrowsingArchive {
+                archiveReadOnlyBanner
+                Divider()
+            }
+            ZStack {
+                // Don't render the actual grid / map while scanning. SwiftUI
+                // would otherwise diff a ForEach over a 1000-item array on
+                // every batch update from the streaming scan, which spikes the
+                // main thread (rainbow spinner). Show only the loading scene
+                // until the scan settles.
+                if state.isLoading {
+                    loadingOverlay
+                } else if state.imageURLs.isEmpty && state.folder != nil {
+                    emptyFolderHint
+                } else {
+                    switch mode {
+                    case .grid:
+                        VStack(spacing: 0) {
+                            FilterBar(
+                                activeFilter: $state.photoFilter,
+                                vimKeymap: vimKeymap,
+                                imageURLs: state.imageURLs
+                            )
+                            Divider()
+                            thumbnailGrid
+                        }
+                    case .map:  mapView
+                    }
                 }
             }
         }
+    }
+
+    private var archiveReadOnlyBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "archivebox")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Archive preview")
+                    .font(.caption.weight(.semibold))
+                Text("Read-only until extracted")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let source = state.archiveSourceURL {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([source])
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Reveal archive in Finder")
+                .accessibilityLabel("Reveal archive in Finder")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.orange.opacity(0.09))
     }
 
     /// Shown when the active folder has zero photos at the top level. The
@@ -278,13 +348,18 @@ struct BrowserView: View {
                     .background(Capsule().fill(Color.accentColor))
             } else if !state.imageURLs.isEmpty {
                 let total = state.imageURLs.count
-                if let i = state.selectedIndex {
+                if state.photoFilter != .all {
+                    Text("\(filteredURLs.count) of \(total)")
+                        .font(.system(.callout, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else if let i = state.selectedIndex {
                     Text("\(i + 1) / \(total)")
                         .font(.system(.callout, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
                 } else {
-                    Text("\(total) photo\(total == 1 ? "" : "s")")
+                    Text("\(total) item\(total == 1 ? "" : "s")")
                         .font(.system(.callout, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -298,13 +373,13 @@ struct BrowserView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: thumbnailSize), spacing: 8)],
+                    columns: [GridItem(.adaptive(minimum: CGFloat(thumbnailSize)), spacing: 8)],
                     spacing: 8
                 ) {
                     // Key cells by URL, not index. Sort/delete reshuffles
                     // positions; URL identity prevents SwiftUI from reusing
                     // a decoded thumbnail for the wrong file.
-                    ForEach(state.imageURLs, id: \.self) { url in
+                    ForEach(filteredURLs, id: \.self) { url in
                         ThumbnailCell(
                             url: url,
                             isSelected: state.currentURL == url,
@@ -312,12 +387,19 @@ struct BrowserView: View {
                             colorLabel: vimKeymap.colorLabel(for: url),
                             isPicked: vimKeymap.isPicked(url),
                             isRejected: vimKeymap.isRejected(url),
-                            size: thumbnailSize,
+                            size: CGFloat(thumbnailSize),
+                            allowsTrash: !state.isBrowsingArchive,
                             onTrash: { state.trashImage(at: url) }
                         )
                         .id(url)
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(url.lastPathComponent)
+                        .accessibilityValue(accessibilityStatus(for: url))
+                        .accessibilityAddTraits(
+                            state.currentURL == url || state.multiSelection.contains(url)
+                                ? .isSelected
+                                : []
+                        )
                         .accessibilityAction(.default) {
                             state.multiSelection.removeAll()
                             state.select(url: url)
@@ -345,8 +427,10 @@ struct BrowserView: View {
                 .padding(8)
             }
             .onChange(of: state.selectedIndex) { _, newValue in
-                if let i = newValue, i < state.imageURLs.count {
-                    withAnimation { proxy.scrollTo(state.imageURLs[i], anchor: .center) }
+                if newValue != nil,
+                   let url = state.currentURL,
+                   filteredURLs.contains(url) {
+                    withAnimation { proxy.scrollTo(url, anchor: .center) }
                 }
             }
         }
@@ -372,12 +456,45 @@ struct BrowserView: View {
     /// is "select range from anchor"; ⌘-shift-click would be "add range",
     /// but the simpler semantics are good enough for v1).
     private func extendMultiSelect(to url: URL) {
-        guard let idx = state.imageURLs.firstIndex(of: url) else { return }
-        let anchor = state.selectedIndex ?? idx
+        let urls = filteredURLs
+        guard let idx = urls.firstIndex(of: url) else { return }
+        let anchor = state.currentURL.flatMap { urls.firstIndex(of: $0) } ?? idx
         let lo = min(anchor, idx)
         let hi = max(anchor, idx)
-        state.multiSelection = Set(state.imageURLs[lo...hi])
-        state.selectedIndex = idx
+        state.multiSelection = Set(urls[lo...hi])
+        state.select(url: url)
+    }
+
+    private var filteredURLs: [URL] {
+        state.photoFilter.apply(to: state.imageURLs, keymap: vimKeymap)
+    }
+
+    private var canEnhanceCurrent: Bool {
+        guard !state.isBrowsingArchive else { return false }
+        guard let url = state.currentURL else { return false }
+        return MediaTyping.detect(url) == .staticImage
+    }
+
+    private func reconcileSelection(with urls: [URL]) {
+        let visible = Set(urls)
+        state.multiSelection.formIntersection(visible)
+        if let current = state.currentURL, visible.contains(current) { return }
+        if let first = urls.first {
+            state.select(url: first)
+        } else {
+            state.selectedIndex = nil
+        }
+    }
+
+    private func accessibilityStatus(for url: URL) -> String {
+        var values: [String] = []
+        if state.currentURL == url { values.append("selected") }
+        if state.multiSelection.contains(url) { values.append("in multi-selection") }
+        if vimKeymap.isPicked(url) { values.append("picked") }
+        if vimKeymap.isRejected(url) { values.append("rejected") }
+        let label = vimKeymap.colorLabel(for: url)
+        if label > 0 { values.append("label \(label)") }
+        return values.isEmpty ? "unreviewed" : values.joined(separator: ", ")
     }
 
     // MARK: - Map
@@ -404,6 +521,7 @@ struct BrowserView: View {
     @MainActor
     private func handleBlinkKey(_ press: KeyPress) -> KeyPress.Result {
         guard !showShortcutOverlay else { return .ignored }
+        guard canEnhanceCurrent else { return .ignored }
         guard press.key.character == "b" || press.key.character == "B" else {
             return .ignored
         }
@@ -432,16 +550,38 @@ struct BrowserView: View {
             return .handled
         }
 
+        if state.isBrowsingArchive {
+            let character = press.key.character
+            let isCullingEdit = character == "P" || character == "X"
+                || character == "m" || character.wholeNumberValue != nil
+            if isCullingEdit {
+                state.lastError = "Archive previews are read-only. Extract the archive in Finder before saving culling changes."
+                return .handled
+            }
+        }
+
+        // AVPlayer owns arrows and Space for transport. Vim j/k remain the
+        // dependable way to move between items while a video is selected.
+        if let url = state.currentURL,
+           MediaTyping.detect(url) == .video {
+            switch press.key {
+            case .leftArrow, .rightArrow, .upArrow, .downArrow:
+                return .ignored
+            default:
+                break
+            }
+        }
+
         // When the enhancement panel is open, arrows belong to its sliders
         // and pickers. Vim j/k still navigate photos.
         switch press.key {
         case .leftArrow, .upArrow:
             guard !state.showEnhancementPanel else { return .ignored }
-            state.selectPrevious()
+            state.selectPreviousVisible()
             return .handled
         case .rightArrow, .downArrow:
             guard !state.showEnhancementPanel else { return .ignored }
-            state.selectNext()
+            state.selectNextVisible()
             return .handled
         default: break
         }
@@ -455,8 +595,24 @@ struct BrowserView: View {
             totalCount: state.imageURLs.count
         )
 
-        if action == .none { return .ignored }
-        state.dispatch(action)
+        switch action {
+        case .next:
+            state.selectNextVisible()
+        case .prev:
+            state.selectPreviousVisible()
+        case .first:
+            state.selectFirstVisible()
+        case .last:
+            state.selectLastVisible()
+        case .jumpToMark(let character):
+            if let url = vimKeymap.marks[character], filteredURLs.contains(url) {
+                state.select(url: url)
+            }
+        case .none:
+            return .ignored
+        default:
+            state.dispatch(action)
+        }
         return .handled
     }
 
@@ -481,6 +637,8 @@ struct ThumbnailCell: View {
     let isPicked: Bool
     let isRejected: Bool
     let size: CGFloat
+    /// False for temporary archive previews, whose files must not be moved.
+    let allowsTrash: Bool
     /// One-click trash. Called from the hover-revealed X and the right-
     /// click context menu — kept as a closure so the cell doesn't need
     /// AppState injected through every preview path.
@@ -551,7 +709,7 @@ struct ThumbnailCell: View {
         // the bottomTrailing corner — topLeading/topTrailing are taken
         // by the color label and pick/reject markers.
         .overlay(alignment: .bottomTrailing) {
-            if hovered {
+            if hovered && allowsTrash {
                 Button {
                     onTrash()
                 } label: {
@@ -604,11 +762,13 @@ struct ThumbnailCell: View {
             } label: {
                 Label("Reveal in Finder", systemImage: "magnifyingglass")
             }
-            Divider()
-            Button(role: .destructive) {
-                onTrash()
-            } label: {
-                Label("Move to Trash", systemImage: "trash")
+            if allowsTrash {
+                Divider()
+                Button(role: .destructive) {
+                    onTrash()
+                } label: {
+                    Label("Move to Trash", systemImage: "trash")
+                }
             }
         }
         .task(id: url) {
@@ -623,14 +783,18 @@ struct ThumbnailCell: View {
     }
 
     private func colorForLabel(_ label: Int) -> Color {
-        // Standard Lightroom-style color labels — red/yellow/green/blue/purple
-        // for 1-5, then fall through to gray for 6-9.
+        // The first five follow the familiar photo-workflow palette; 6-9 stay
+        // visually distinct so every keyboard-assignable label is filterable.
         switch label {
         case 1: .red
         case 2: .yellow
         case 3: .green
         case 4: .blue
         case 5: .purple
+        case 6: .orange
+        case 7: .cyan
+        case 8: .mint
+        case 9: .pink
         default: .gray
         }
     }

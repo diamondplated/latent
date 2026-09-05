@@ -76,6 +76,7 @@ public struct TileExecutor: Sendable {
         process: @Sendable (ImageBuffer) async throws -> ImageBuffer
     ) async throws -> ImageBuffer {
         precondition(input.format == .working, "TileExecutor requires working format")
+        try Task.checkCancellation()
 
         let (outWResult, widthOverflow) = input.width.multipliedReportingOverflow(by: scale)
         let (outHResult, heightOverflow) = input.height.multipliedReportingOverflow(by: scale)
@@ -108,7 +109,9 @@ public struct TileExecutor: Sendable {
         // Fast path: input fits in a single tile, no tiling needed.
         if input.width <= tileSize && input.height <= tileSize {
             progress.report(0.0)
+            try Task.checkCancellation()
             let output = try await process(input)
+            try Task.checkCancellation()
             guard output.width == outW, output.height == outH else {
                 throw TileExecutorError.processProducedWrongSize(
                     expected: (outW, outH),
@@ -133,6 +136,7 @@ public struct TileExecutor: Sendable {
         var tileIndex = 0
         for ty in 0..<tilesY {
             for tx in 0..<tilesX {
+                try Task.checkCancellation()
                 let tileX = min(tx * stride, input.width - tileSize)
                 let tileY = min(ty * stride, input.height - tileSize)
                 let actualX = max(0, tileX)
@@ -149,6 +153,7 @@ public struct TileExecutor: Sendable {
 
                 // Process tile.
                 let processed = try await process(tile)
+                try Task.checkCancellation()
                 let expectedW = tileW * scale
                 let expectedH = tileH * scale
                 guard processed.width == expectedW, processed.height == expectedH else {
@@ -180,14 +185,18 @@ public struct TileExecutor: Sendable {
 
         // Normalize accumulator by weights, convert to Float16 storage.
         var output = Data(count: pixelCount * MemoryLayout<Float16>.size * 4)
-        output.withUnsafeMutableBytes { rawPtr in
+        try output.withUnsafeMutableBytes { rawPtr in
             let outPtr = rawPtr.bindMemory(to: Float16.self).baseAddress!
-            for p in 0..<pixelCount {
-                let w = max(weights[p], 1e-6) // guard against div-by-zero in unreachable corners
-                outPtr[p * 4 + 0] = Float16(accum[p * 4 + 0] / w)
-                outPtr[p * 4 + 1] = Float16(accum[p * 4 + 1] / w)
-                outPtr[p * 4 + 2] = Float16(accum[p * 4 + 2] / w)
-                outPtr[p * 4 + 3] = Float16(accum[p * 4 + 3] / w)
+            for y in 0..<outH {
+                if y.isMultiple(of: 64) { try Task.checkCancellation() }
+                for x in 0..<outW {
+                    let p = y * outW + x
+                    let w = max(weights[p], 1e-6) // guard against div-by-zero in unreachable corners
+                    outPtr[p * 4 + 0] = Float16(accum[p * 4 + 0] / w)
+                    outPtr[p * 4 + 1] = Float16(accum[p * 4 + 1] / w)
+                    outPtr[p * 4 + 2] = Float16(accum[p * 4 + 2] / w)
+                    outPtr[p * 4 + 3] = Float16(accum[p * 4 + 3] / w)
+                }
             }
         }
 

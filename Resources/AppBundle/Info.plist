@@ -30,10 +30,10 @@
     <string>APPL</string>
 
     <key>CFBundleShortVersionString</key>
-    <string>0.1.1</string>
+    <string>0.2.0</string>
 
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
 
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
@@ -43,6 +43,9 @@
 
     <key>NSHighResolutionCapable</key>
     <true/>
+
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Latent shares selected photos and videos with devices you approve on your local network.</string>
 
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
@@ -68,7 +71,7 @@
             <key>CFBundleTypeRole</key>
             <string>Viewer</string>
             <key>LSHandlerRank</key>
-            <string>Alternate</string>
+            <string>Default</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.jpeg</string>
@@ -80,7 +83,7 @@
                 <string>com.microsoft.bmp</string>
                 <string>org.webmproject.webp</string>
                 <string>public.avif</string>
-                <string>public.jxl</string>
+                <string>public.jpeg-xl</string>
             </array>
         </dict>
         <dict>
@@ -89,16 +92,65 @@
             <key>CFBundleTypeRole</key>
             <string>Viewer</string>
             <key>LSHandlerRank</key>
-            <string>Alternate</string>
+            <string>Default</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>public.camera-raw-image</string>
                 <string>com.adobe.raw-image</string>
                 <string>com.canon.cr2-raw-image</string>
                 <string>com.canon.cr3-raw-image</string>
                 <string>com.nikon.raw-image</string>
                 <string>com.sony.arw-raw-image</string>
                 <string>com.fuji.raw-image</string>
+                <string>com.olympus.raw-image</string>
+                <string>com.panasonic.rw2-raw-image</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Video</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.mpeg-4</string>
+                <string>com.apple.quicktime-movie</string>
+                <string>com.apple.m4v-video</string>
+                <string>public.3gpp</string>
+                <string>public.3gpp2</string>
+                <string>public.avi</string>
+                <string>public.avchd-mpeg-2-transport-stream</string>
+                <string>public.mpeg</string>
+                <string>public.mpeg-2-video</string>
+                <string>public.mpeg-2-transport-stream</string>
+                <string>public.dv-movie</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>mp4</string>
+                <string>mpg4</string>
+                <string>mov</string>
+                <string>qt</string>
+                <string>m4v</string>
+                <string>3gp</string>
+                <string>3gpp</string>
+                <string>sdv</string>
+                <string>3g2</string>
+                <string>3gp2</string>
+                <string>avi</string>
+                <string>vfw</string>
+                <string>mts</string>
+                <string>m2ts</string>
+                <string>mpg</string>
+                <string>mpeg</string>
+                <string>mpe</string>
+                <string>m75</string>
+                <string>m15</string>
+                <string>m2v</string>
+                <string>ts</string>
+                <string>dv</string>
+                <string>dif</string>
             </array>
         </dict>
         <dict>

@@ -89,6 +89,9 @@ final class AppState {
     /// Whether the folder-tree sidebar (far-left pane) is visible. Default
     /// false to keep the layout simple for new users; toolbar button toggles.
     var showFolderTree: Bool = false
+    /// Grid filter is app state (rather than view-local) so window-level
+    /// keyboard navigation can stay inside the same visible result set.
+    var photoFilter: PhotoFilter = .all
     /// Sort order applied to folders in the tree sidebar. Persisted across
     /// launches because it's the kind of preference you set once. Default
     /// is alphabetical; "Recently Modified" is the choice for users who
@@ -183,9 +186,15 @@ final class AppState {
 
     private var fileWatcher: DispatchSourceFileSystemObject?
     private var extractedArchiveDir: URL?
+    /// Archive contents are previews backed by a temporary extraction tree.
+    /// Mutating them would appear to work and then vanish on close, so the UI
+    /// and action layer treat the tree as explicitly read-only.
+    private(set) var isBrowsingArchive = false
+    private(set) var archiveSourceURL: URL?
     private var loadedRecursively: Bool = false
     private var watcherRescanTask: Task<Void, Never>? = nil
     private var scanTask: Task<Void, Never>? = nil
+    private var archiveExtractionTask: Task<URL, Error>? = nil
     private var scanGeneration: UInt64 = 0
     var folderTreeChangeTick: Int = 0
     private(set) var lastRemovedFolder: URL? = nil
@@ -201,7 +210,7 @@ final class AppState {
     /// animated images (GIF / APNG / animated HEIC etc.), and video formats
     /// AVFoundation can take a swing at. The actual playback decision is
     /// made later by `MediaTyping.detect` per file.
-    static var imageExtensions: Set<String> { MediaTyping.allMediaExts }
+    nonisolated static var imageExtensions: Set<String> { MediaTyping.allMediaExts }
 
     /// Where macOS saves screenshots. Reads the `com.apple.screencapture`
     /// `location` default that's set by ⌘⇧5 → Options → Save to. Falls
@@ -264,6 +273,11 @@ final class AppState {
     func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = false) async -> Bool {
         scanGeneration &+= 1
         let generation = scanGeneration
+        let openingArchive = ArchiveExtractor.isArchive(url)
+        let existingExtraction = extractedArchiveDir
+        let reusingExtraction = existingExtraction.map {
+            Self.isSameOrDescendant(url, of: $0)
+        } ?? false
 
         // Prevent the previous folder's watcher from committing into this load.
         stopWatching()
@@ -276,40 +290,64 @@ final class AppState {
             prev.cancel()
             await prev.value
         }
+        if let previousExtractionTask = archiveExtractionTask {
+            previousExtractionTask.cancel()
+            _ = try? await previousExtractionTask.value
+        }
         guard generation == scanGeneration else { return false }
         scanTask = nil
+        archiveExtractionTask = nil
 
         // Drop the old folder's prefetched images — the new folder's URLs
         // share no overlap, so cached entries are pure memory waste.
         prefetcher.clear()
 
-        selectedIndex = nil
+        selection.reset()
+        imageURLs = []
+        photoFilter = .all
         lastError = nil
-        if setAsAnchor { anchorFolder = url }
+
+        // Archive extraction has no useful partial state. Clear the old folder
+        // before starting it so pressing Stop cannot leave that folder shown
+        // empty with its watcher already torn down.
+        if openingArchive {
+            folder = nil
+        }
 
         // Clean up any previous extracted-archive dir so /tmp doesn't fill up
-        // when the user opens several archives in a row.
-        if let prev = extractedArchiveDir {
-            try? FileManager.default.removeItem(at: prev)
+        // when the user opens several archives in a row. A recursive reload
+        // of the current extraction must keep that tree alive.
+        if let prev = extractedArchiveDir, !reusingExtraction {
             extractedArchiveDir = nil
+            isBrowsingArchive = false
+            archiveSourceURL = nil
+            Self.removeArchiveExtractionInBackground(prev)
         }
 
         // Resolve the folder we're going to scan: archive → extract first,
         // then treat the extraction dir as the source.
         let scanRoot: URL
-        if ArchiveExtractor.isArchive(url) {
+        if openingArchive {
             loadPhase = .extracting(archiveName: url.lastPathComponent)
             do {
                 let extractor = ArchiveExtractor()
-                scanRoot = try await extractor.extract(url)
+                let extractionTask = Task { try await extractor.extract(url) }
+                archiveExtractionTask = extractionTask
+                scanRoot = try await extractionTask.value
                 guard generation == scanGeneration else {
-                    try? FileManager.default.removeItem(at: scanRoot)
+                    Self.removeArchiveExtractionInBackground(scanRoot)
                     return false
                 }
+                archiveExtractionTask = nil
                 extractedArchiveDir = scanRoot
+                isBrowsingArchive = true
+                archiveSourceURL = url
             } catch {
                 guard generation == scanGeneration else { return false }
+                archiveExtractionTask = nil
                 lastError = "\(error)"
+                isBrowsingArchive = false
+                archiveSourceURL = nil
                 folder = nil
                 imageURLs = []
                 loadPhase = nil
@@ -317,15 +355,20 @@ final class AppState {
             }
         } else {
             scanRoot = url
+            if !reusingExtraction {
+                isBrowsingArchive = false
+                archiveSourceURL = nil
+            }
         }
 
         folder = scanRoot
+        if setAsAnchor { anchorFolder = scanRoot }
         loadedRecursively = recursive
         // Push the user's ORIGINAL pick (which may be an archive file) to
         // the recents — re-opening from recents replays the same flow,
         // including extraction. Only push real, non-temp paths so cleaned-
         // up extraction dirs don't poison the list.
-        recents.push(url)
+        if !reusingExtraction { recents.push(url) }
         loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
 
         // Walk on a background task we can cancel from `cancelScan()`.
@@ -373,6 +416,14 @@ final class AppState {
     /// (sorting partial results + main-actor commit), but the user
     /// shouldn't see the loader linger while that happens.
     func cancelScan() {
+        if let archiveExtractionTask {
+            // Archive extraction has no partial result worth keeping. Cancel
+            // its process and invalidate this load so it cannot open after the
+            // user has dismissed the loading scene.
+            scanGeneration &+= 1
+            archiveExtractionTask.cancel()
+            self.archiveExtractionTask = nil
+        }
         scanTask?.cancel()
         loadPhase = nil
     }
@@ -382,6 +433,7 @@ final class AppState {
     /// wants the tree to come along, otherwise they'd have just clicked
     /// elsewhere. No-op at filesystem root.
     func goUp() {
+        guard !isBrowsingArchive else { return }
         guard let f = folder else { return }
         let parent = f.deletingLastPathComponent()
         // deletingLastPathComponent on "/" returns "/" — same path means
@@ -393,6 +445,7 @@ final class AppState {
     /// True when `goUp` would do something — there's a folder loaded and
     /// it has a real parent. Drives the toolbar button's enabled state.
     var canGoUp: Bool {
+        guard !isBrowsingArchive else { return false }
         guard let f = folder else { return false }
         return f.deletingLastPathComponent().path != f.path
     }
@@ -406,7 +459,7 @@ final class AppState {
     /// We prefetch contentModificationDate alongside isRegularFile so the
     /// mtime-sort path doesn't pay a per-URL stat after the walk. The
     /// resourceValues are cached on the returned URLs.
-    private static func walkFolder(
+    nonisolated private static func walkFolder(
         _ root: URL,
         recursive: Bool,
         onProgress: (@Sendable (Int) async -> Void)? = nil
@@ -495,13 +548,11 @@ final class AppState {
     /// non-recursive folder doesn't trigger a full-tree walk on every fs
     /// event. Cancellable: the watcher cancels an in-flight rescan when a
     /// new event fires, so rapid-fire events coalesce.
-    private static func walkAndSort(_ root: URL, recursive: Bool, sort: FolderSort) async -> [URL] {
+    nonisolated private static func walkAndSort(_ root: URL, recursive: Bool, sort: FolderSort) async -> [URL] {
         let basePath = root.path
-        return await Task.detached(priority: .utility) {
-            let all = await walkFolder(root, recursive: recursive)
-            if Task.isCancelled { return all }
-            return Self.sortPhotos(all, by: sort, basePath: basePath)
-        }.value
+        let all = await walkFolder(root, recursive: recursive)
+        if Task.isCancelled { return all }
+        return Self.sortPhotos(all, by: sort, basePath: basePath)
     }
 
     private func startWatching(_ url: URL) {
@@ -604,8 +655,15 @@ final class AppState {
 
     // MARK: - Trash delegation
 
-    func trashImage(at url: URL) { trash.trashImage(at: url) }
-    func trashImages(_ urls: [URL]) { trash.trashImages(urls) }
+    func trashImage(at url: URL) {
+        guard ensureWritableSource() else { return }
+        trash.trashImage(at: url)
+    }
+
+    func trashImages(_ urls: [URL]) {
+        guard ensureWritableSource() else { return }
+        trash.trashImages(urls)
+    }
 
 
 
@@ -637,6 +695,7 @@ final class AppState {
     /// Trash whatever's selected — the active multi-selection if any,
     /// otherwise the single primary photo. Bound to Backspace.
     func trashCurrentImage() {
+        guard ensureWritableSource() else { return }
         if !multiSelection.isEmpty {
             trash.trashImages(Array(multiSelection))
             return
@@ -657,7 +716,17 @@ final class AppState {
     /// Move a whole folder to the Trash. UI changes only after macOS confirms
     /// the filesystem operation succeeded.
     func trashFolder(at url: URL) {
+        guard ensureWritableSource() else { return }
         trash.trashFolder(at: url)
+    }
+
+    @discardableResult
+    private func ensureWritableSource() -> Bool {
+        guard !isBrowsingArchive else {
+            lastError = "Archive previews are read-only. Extract the archive in Finder before editing or trashing its contents."
+            return false
+        }
+        return true
     }
 
     private func handleFolderTrashSuccess(_ url: URL) {
@@ -688,11 +757,13 @@ final class AppState {
         // keep churning fs reads after the user closes the folder.
         scanTask?.cancel()
         scanTask = nil
+        archiveExtractionTask?.cancel()
+        archiveExtractionTask = nil
         stopWatching()
-        if let prev = extractedArchiveDir {
-            try? FileManager.default.removeItem(at: prev)
-            extractedArchiveDir = nil
-        }
+        let extractionToRemove = extractedArchiveDir
+        extractedArchiveDir = nil
+        isBrowsingArchive = false
+        archiveSourceURL = nil
         // The prefetch cache is folder-scoped — clear it so the new
         // (empty) state isn't holding ~480MB of decoded images that the
         // user can't see.
@@ -703,7 +774,27 @@ final class AppState {
         anchorFolder = nil
         imageURLs = []
         selection.reset()
+        photoFilter = .all
         loadPhase = nil
+        if let extractionToRemove {
+            Self.removeArchiveExtractionInBackground(extractionToRemove)
+        }
+    }
+
+    private static func isSameOrDescendant(_ candidate: URL, of directory: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        let prefix = directoryPath.hasSuffix("/") ? directoryPath : directoryPath + "/"
+        return candidatePath == directoryPath || candidatePath.hasPrefix(prefix)
+    }
+
+    /// Large archive previews can contain tens of thousands of entries. Once
+    /// the main actor has severed every reference, delete that private tree on
+    /// a utility task so closing or switching albums never freezes the window.
+    nonisolated private static func removeArchiveExtractionInBackground(_ directory: URL) {
+        Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     // Note: no deinit cancel of fileWatcher — main-actor isolation prevents

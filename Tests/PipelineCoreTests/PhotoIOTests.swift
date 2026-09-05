@@ -3,10 +3,11 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+@testable import PipelineCore
 @testable import PhotoIO
 
 final class ArchiveExtractorTests: XCTestCase {
-    func testRunProcessDrainsLargeOutput() async {
+    func testRunProcessBoundsLargeDiagnosticOutput() async {
         let command = """
         i=0
         while [ "$i" -lt 70000 ]; do printf o; i=$((i + 1)); done
@@ -14,9 +15,10 @@ final class ArchiveExtractorTests: XCTestCase {
         while [ "$i" -lt 70000 ]; do printf e >&2; i=$((i + 1)); done
         exit 7
         """
+        let extractor = ArchiveExtractor(limits: ArchiveExtractionLimits(maximumDiagnosticBytes: 1_024))
 
         do {
-            try await ArchiveExtractor().runProcess(
+            try await extractor.runProcess(
                 tool: "/bin/sh",
                 args: ["-c", command],
                 inputArchive: URL(fileURLWithPath: "/tmp/large-output.zip")
@@ -24,9 +26,62 @@ final class ArchiveExtractorTests: XCTestCase {
             XCTFail("Expected the process to fail")
         } catch let ArchiveError.extractionFailed(_, code, stderr) {
             XCTAssertEqual(code, 7)
-            XCTAssertEqual(stderr.utf8.count, 70_000)
+            XCTAssertLessThan(stderr.utf8.count, 1_100)
+            XCTAssertTrue(stderr.hasPrefix("e"))
+            XCTAssertTrue(stderr.contains("diagnostic output truncated"))
         } catch {
             XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRunProcessTimesOutAndTerminatesTool() async {
+        let extractor = ArchiveExtractor(limits: ArchiveExtractionLimits(timeout: 0.05, pollInterval: 0.01))
+        do {
+            try await extractor.runProcess(
+                tool: "/bin/sleep",
+                args: ["5"],
+                inputArchive: URL(fileURLWithPath: "/tmp/slow.zip")
+            )
+            XCTFail("Expected timeout")
+        } catch ArchiveError.extractionTimedOut {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRunProcessRespondsToTaskCancellation() async {
+        let extractor = ArchiveExtractor(limits: ArchiveExtractionLimits(pollInterval: 0.01))
+        let task = Task {
+            try await extractor.runProcess(
+                tool: "/bin/sleep",
+                args: ["5"],
+                inputArchive: URL(fileURLWithPath: "/tmp/cancelled.zip")
+            )
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+
+        do {
+            try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testMemberPathValidationRejectsTraversalAndAbsolutePaths() throws {
+        let archive = URL(fileURLWithPath: "/tmp/paths.zip")
+        XCTAssertNoThrow(try ArchiveExtractor.validateMemberPath("photos/2026/image.jpg", archiveURL: archive))
+
+        for unsafePath in ["../escape.jpg", "photos/../../escape.jpg", "/tmp/escape.jpg", "C:\\escape.jpg"] {
+            XCTAssertThrowsError(try ArchiveExtractor.validateMemberPath(unsafePath, archiveURL: archive)) { error in
+                guard case ArchiveError.unsafeArchive = error else {
+                    return XCTFail("Expected unsafeArchive for \(unsafePath), got \(error)")
+                }
+            }
         }
     }
 
@@ -113,5 +168,44 @@ final class ImageFileFormatTests: XCTestCase {
         XCTAssertEqual(ImageFileFormat.heic.preferredFilenameExtension, "heic")
         XCTAssertEqual(ImageFileFormat.png.preferredFilenameExtension, "png")
         XCTAssertEqual(ImageFileFormat.tiff.preferredFilenameExtension, "tiff")
+    }
+}
+
+final class ImageWriterKeepBothTests: XCTestCase {
+    func testAtomicExportKeepsExistingFileAndUsesNumberedSibling() throws {
+        let fileManager = FileManager.default
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("latent-export-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let preferred = directory.appendingPathComponent("portrait_enhanced.jpg")
+        let sentinel = Data("existing export".utf8)
+        try sentinel.write(to: preferred)
+
+        let width = 4
+        let height = 4
+        let buffer = ImageBuffer(
+            width: width,
+            height: height,
+            format: .working,
+            pixels: Data(count: width * height * ImageFormat.working.bytesPerPixel)
+        )
+        let writer = ImageWriter()
+
+        let second = try writer.writeKeepingBoth(buffer: buffer, metadata: nil, to: preferred)
+        let third = try writer.writeKeepingBoth(buffer: buffer, metadata: nil, to: preferred)
+
+        XCTAssertEqual(second.lastPathComponent, "portrait_enhanced 2.jpg")
+        XCTAssertEqual(third.lastPathComponent, "portrait_enhanced 3.jpg")
+        XCTAssertEqual(try Data(contentsOf: preferred), sentinel, "the previous export must not be replaced")
+        XCTAssertTrue(fileManager.fileExists(atPath: second.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: third.path))
+
+        let leftovers = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".latent-export-") }
+        XCTAssertTrue(leftovers.isEmpty, "temporary export files should be removed after commit")
     }
 }

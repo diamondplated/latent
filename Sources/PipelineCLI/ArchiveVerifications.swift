@@ -92,7 +92,82 @@ public func archiveExtractRejectsBadFormat() async throws {
     }
 }
 
+public func archiveRejectsEscapingSymlink() async throws {
+    let fm = FileManager.default
+    let workDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pv-archive-symlink-test-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: workDir) }
+
+    let payload = workDir.appendingPathComponent("payload", isDirectory: true)
+    try fm.createDirectory(at: payload, withIntermediateDirectories: true)
+    try fm.createSymbolicLink(
+        atPath: payload.appendingPathComponent("escape").path,
+        withDestinationPath: "../../outside-latent-archive-test"
+    )
+
+    let archive = workDir.appendingPathComponent("escaping-link.tar")
+    try runArchiveFixtureTool(
+        "/usr/bin/tar",
+        arguments: ["-cf", archive.path, "-C", workDir.path, "payload"]
+    )
+
+    let extractor = ArchiveExtractor()
+    do {
+        let extracted = try await extractor.extract(archive)
+        await extractor.cleanup(extracted)
+        throw VerifyError(message: "expected escaping symlink to be rejected")
+    } catch ArchiveError.unsafeArchive {
+        // Expected: the extracted link resolves outside the private temp root.
+    }
+}
+
+public func archiveRejectsExpandedFileOverLimit() async throws {
+    let fm = FileManager.default
+    let workDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pv-archive-limit-test-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: workDir) }
+
+    let payload = workDir.appendingPathComponent("large.jpg")
+    try Data(repeating: 0x5a, count: 4_096).write(to: payload)
+    let archive = workDir.appendingPathComponent("oversized.tar")
+    try runArchiveFixtureTool(
+        "/usr/bin/tar",
+        arguments: ["-cf", archive.path, "-C", workDir.path, payload.lastPathComponent]
+    )
+
+    let limits = ArchiveExtractionLimits(
+        maximumExpandedBytes: 1_024,
+        maximumSingleFileBytes: 1_024,
+        pollInterval: 0.01
+    )
+    let extractor = ArchiveExtractor(limits: limits)
+    do {
+        let extracted = try await extractor.extract(archive)
+        await extractor.cleanup(extracted)
+        throw VerifyError(message: "expected expanded-size limit to be enforced")
+    } catch ArchiveError.resourceLimitExceeded {
+        // Expected.
+    }
+}
+
 // MARK: - Helpers
+
+private func runArchiveFixtureTool(_ tool: String, arguments: [String]) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: tool)
+    process.arguments = arguments
+    let stderr = Pipe()
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = stderr
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus != 0 {
+        let message = String(decoding: stderr.fileHandleForReading.availableData, as: UTF8.self)
+        throw VerifyError(message: "fixture tool failed (exit \(process.terminationStatus)): \(message)")
+    }
+}
 
 private func writeTinyJPEG(width: Int, height: Int, to url: URL) throws {
     let cs = CGColorSpace(name: CGColorSpace.sRGB)!

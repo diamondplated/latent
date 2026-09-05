@@ -110,11 +110,18 @@ public struct Pipeline: Sendable {
                 throw PipelineError.stageFailed(stageID: step.stageID, underlying: error)
             }
 
+            // A synchronous Core ML prediction may finish after cancellation.
+            // Its pixels are valid, but retaining a large obsolete output and
+            // announcing completion wastes memory and can briefly misreport UI
+            // progress. Leave the cache untouched and unwind instead.
+            if Task.isCancelled { throw PipelineError.cancelled }
             await cache.put(output, for: key)
+            if Task.isCancelled { throw PipelineError.cancelled }
             await observer.stageCompleted(stageID: step.stageID, cacheHit: false)
             current = output
         }
 
+        if Task.isCancelled { throw PipelineError.cancelled }
         return current
     }
 }
