@@ -4,6 +4,12 @@ import Foundation
 /// produces; switching to Float16 for storage would halve the index size at
 /// some accuracy cost (likely negligible for cosine similarity).
 public struct EmbeddingVector: Sendable, Hashable, Codable {
+    /// OpenCLIP ViT-B/32's shared image/text embedding width.
+    ///
+    /// Keep this contract in one place so model outputs and persisted-index
+    /// validation cannot silently drift apart.
+    public static let clipDimension = 512
+
     public let values: [Float]
 
     public init(_ values: [Float]) {

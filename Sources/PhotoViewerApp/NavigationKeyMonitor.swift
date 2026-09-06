@@ -68,6 +68,12 @@ final class NavigationKeyMonitor {
         // through them anyway), but better not to mess with it.
         guard state.folder != nil else { return event }
 
+        // Search owns normal text editing while its field is focused. This
+        // must precede our Cmd-A/Cmd-Z and Backspace/arrow handling so those
+        // retain their standard NSTextField meanings instead of selecting,
+        // undoing trash, deleting, or navigating photos.
+        if state.isSearchFieldFocused { return event }
+
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let onlyCmd = (mods == .command)
 

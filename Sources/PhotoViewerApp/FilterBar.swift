@@ -176,8 +176,12 @@ extension PhotoFilter {
 // MARK: - Filter-aware selection
 
 extension AppState {
-    private var visibleImageURLs: [URL] {
-        photoFilter.apply(to: imageURLs, keymap: vimKeymap)
+    var visibleImageURLs: [URL] {
+        let culled = photoFilter.apply(to: imageURLs, keymap: vimKeymap)
+        guard let searchResultURLs else { return culled }
+        let allowed = Set(culled)
+        // Preserve semantic rank rather than falling back to folder sort.
+        return searchResultURLs.filter { allowed.contains($0) }
     }
 
     func selectNextVisible() {

@@ -31,7 +31,7 @@ public enum CLIPTextEncoderError: Error, CustomStringConvertible {
 public actor CLIPTextEncoder {
     private let model: CoreMLImageModel?
     private let tokenizer: CLIPBPETokenizer?
-    public static let embeddingDimension = 512
+    public static let embeddingDimension = EmbeddingVector.clipDimension
 
     public init() async {
         // We pass `.openCLIPImage` as a placeholder spec — it's only used by

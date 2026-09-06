@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
+import PhotoIO
 import PhotoSearch
 import PhotoServe
 import PhotoViewerCore
@@ -56,7 +57,12 @@ actor PhoneAccessController: ServeDelegate {
     /// two CoreML models and parses the folder's whole embedding index, so it
     /// is kept rather than rebuilt per query. The root is stored with it so a
     /// folder change retires it without anything having to remember to.
-    private var searchEngine: (root: URL, engine: SearchEngine)?
+    private struct SearchIndexStamp: Equatable {
+        let fileSize: Int
+        let modifiedAt: Date
+        let resourceIdentifier: String
+    }
+    private var searchEngine: (root: URL, stamp: SearchIndexStamp?, engine: SearchEngine)?
 
     /// The pairing request currently waiting on a human. `awaitingApproval`
     /// is set before the first suspension point so two concurrent requests
@@ -304,6 +310,7 @@ actor PhoneAccessController: ServeDelegate {
             guard let folder = state.folder else { return }
             let root = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
             guard url.path.hasPrefix(root), state.imageURLs.contains(url) else { return }
+            guard state.ensureActiveFolderContinuity() else { return }
             if state.isBrowsingArchive {
                 switch action {
                 case .next, .prev:
@@ -313,13 +320,22 @@ actor PhoneAccessController: ServeDelegate {
                     return
                 }
             }
+            if state.isCullingPersistenceBlocked {
+                switch action {
+                case .next, .prev:
+                    break
+                default:
+                    state.reportBlockedCullingEdit()
+                    return
+                }
+            }
             // Select the photo the phone is looking at, then dispatch. Mutating
             // actions in VimKeymap operate on the current selection, so the
             // selection move is part of applying the action, not a side effect.
             // Phone sessions address the complete shared folder, so leave any
             // desktop-only filter before selecting. Otherwise a phone action
             // can mutate a hidden item while the detail pane shows another.
-            state.photoFilter = .all
+            state.clearBrowserFiltersForExternalSelection()
             state.select(url: url)
             let vimAction = Self.vimAction(for: action, url: url, keymap: state.vimKeymap)
             state.dispatch(vimAction)
@@ -341,13 +357,17 @@ actor PhoneAccessController: ServeDelegate {
               FileManager.default.fileExists(atPath: indexFile.path)
         else { return nil }
 
+        let currentStamp = Self.searchIndexStamp(for: indexFile)
         var engine: SearchEngine?
-        if let cached = searchEngine, cached.root == root {
+        if let cached = searchEngine,
+           cached.root == root,
+           currentStamp != nil,
+           cached.stamp == currentStamp {
             engine = cached.engine
         } else if let built = try? await SearchEngine(folderURL: root) {
             // `init` throws when the OpenCLIP image encoder is missing, so an
             // index left behind by an older setup still resolves to "no search".
-            searchEngine = (root, built)
+            searchEngine = (root, currentStamp, built)
             engine = built
         }
         guard let engine,
@@ -356,12 +376,34 @@ actor PhoneAccessController: ServeDelegate {
 
         // Ranked by similarity, and the ranking is the answer — the phone
         // renders these in the order they arrive, so it is preserved here.
+        let paths = FolderPathMapper(rootURL: root)
         var ids: [String] = []
         for hit in hits {
-            let url = root.appendingPathComponent(hit.entry.relativePath)
+            guard let url = paths.url(forRelativePath: hit.entry.relativePath) else {
+                continue
+            }
             if let id = await shared.photoID(for: url) { ids.append(id) }
         }
         return ids
+    }
+
+    /// EmbeddingIndex commits via atomic replacement, which changes the file
+    /// resource identifier even when byte count and timestamp happen to match.
+    /// Including all three makes cached phone engines self-invalidating after
+    /// a desktop Refresh without coupling the two UI coordinators together.
+    nonisolated private static func searchIndexStamp(for url: URL) -> SearchIndexStamp? {
+        guard let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey,
+            .contentModificationDateKey,
+            .fileResourceIdentifierKey,
+        ]),
+        let modifiedAt = values.contentModificationDate,
+        let identifier = values.fileResourceIdentifier else { return nil }
+        return SearchIndexStamp(
+            fileSize: values.fileSize ?? 0,
+            modifiedAt: modifiedAt,
+            resourceIdentifier: String(reflecting: identifier)
+        )
     }
 
     // MARK: - Action mapping

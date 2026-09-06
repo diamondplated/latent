@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import PhotoIO
 
 /// Sort order for folder rows in the tree sidebar. Owned by AppState
 /// (`state.folderSort`) and persisted across launches.
@@ -68,10 +69,11 @@ final class FolderNode: Identifiable, Hashable {
     func loadChildrenIfNeeded(sort: FolderSort) {
         guard children == nil else { return }
         let fm = FileManager.default
+        let paths = FolderPathMapper(rootURL: url)
         // Prefetch isDirectory + contentModificationDate together so we
         // don't pay an extra stat-per-URL when sort==.modifiedDescending.
         let items = (try? fm.contentsOfDirectory(
-            at: url,
+            at: paths.enumerationRootURL,
             includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         )) ?? []
@@ -80,7 +82,10 @@ final class FolderNode: Identifiable, Hashable {
             guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey]),
                   vals.isDirectory == true,
                   !Self.skipDir(name: child.lastPathComponent) else { continue }
-            nodes.append(FolderNode(url: child, mtime: vals.contentModificationDate ?? .distantPast))
+            nodes.append(FolderNode(
+                url: paths.rebaseToRoot(child),
+                mtime: vals.contentModificationDate ?? .distantPast
+            ))
         }
         children = Self.sortNodes(nodes, by: sort)
     }
@@ -120,8 +125,9 @@ final class FolderNode: Identifiable, Hashable {
         let exts = AppState.imageExtensions
         let count = await Task.detached(priority: .background) {
             let fm = FileManager.default
+            let paths = FolderPathMapper(rootURL: folderURL)
             guard let items = try? fm.contentsOfDirectory(
-                at: folderURL,
+                at: paths.enumerationRootURL,
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
             ) else { return 0 }

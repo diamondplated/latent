@@ -28,7 +28,7 @@ public enum CLIPImageEncoderError: Error, CustomStringConvertible {
 public actor CLIPImageEncoder {
     private let model: CoreMLImageModel
     private static let modelInputSize = 224
-    public static let embeddingDimension = 512
+    public static let embeddingDimension = EmbeddingVector.clipDimension
 
     public init() async throws {
         guard let underlying = try await ModelManager.shared.model(for: .openCLIPImageEncoder, spec: .openCLIPImage) else {

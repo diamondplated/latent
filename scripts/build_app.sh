@@ -9,8 +9,8 @@
 # Output: ./build/Latent.app — drop into /Applications or run in place.
 #
 # When the project migrates to an Xcode workspace this script gets retired:
-# Xcode produces the .app via xcodebuild and adds code signing + the QL
-# extension target.
+# Xcode would produce the .app via xcodebuild and own the full distribution,
+# entitlement, notarization, and Quick Look extension workflow.
 
 set -euo pipefail
 

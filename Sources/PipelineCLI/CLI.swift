@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -19,6 +20,23 @@ import PhotoServe
 @main
 struct PipelineCLI {
     static func main() async {
+        // Vim persistence checks must never touch the installed app's real
+        // bookmark registry, especially if Latent is open while this verifier
+        // runs. The production code still exercises its normal file/lock path
+        // against a process-scoped temporary Application Support substitute.
+        let vimStateDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("latent-vim-verifier-\(UUID().uuidString)", isDirectory: true)
+        let previousVimStateDirectory = ProcessInfo.processInfo.environment["LATENT_VIM_STATE_DIRECTORY"]
+        setenv("LATENT_VIM_STATE_DIRECTORY", vimStateDirectory.path, 1)
+        defer {
+            if let previousVimStateDirectory {
+                setenv("LATENT_VIM_STATE_DIRECTORY", previousVimStateDirectory, 1)
+            } else {
+                unsetenv("LATENT_VIM_STATE_DIRECTORY")
+            }
+            try? FileManager.default.removeItem(at: vimStateDirectory)
+        }
+
         print("photo-viewer pipeline runner / verifier")
         print("=======================================\n")
 
@@ -40,6 +58,11 @@ struct PipelineCLI {
         failures += await runVerification("EmbeddingVector cosine similarity of identical vectors equals 1", check: embeddingSelfSimilarityIsOne)
         failures += await runVerification("EmbeddingVector cosine similarity of orthogonal vectors equals 0", check: embeddingOrthogonalSimilarityIsZero)
         failures += await runVerification("EmbeddingIndex round-trips entries through save/load", check: embeddingIndexRoundTrip)
+        failures += await runVerification("EmbeddingIndex reads v1 dates and rejects future formats", check: embeddingIndexVersionCompatibility)
+        failures += await runVerification("EmbeddingIndex rejects malformed cached vectors without trapping", check: malformedSearchEmbeddingsAreRejected)
+        failures += await runVerification("Search index inspector detects missing, current and stale folders", check: searchIndexInspectorTracksFolderFreshness)
+        failures += await runVerification("Search index inspector handles Darwin aliases and directory symlink roots", check: searchIndexInspectorHandlesAliasesAndSymlinkRoots)
+        failures += await runVerification("Cancelled search index refresh preserves the previous snapshot", check: cancelledSearchIndexReplacementPreservesPreviousSnapshot)
         failures += await runVerification("CLIPBPETokenizer init from minimal merges file produces 77-token output with SOS/EOS", check: tokenizerSmokeTest)
         // VimKeymap is @MainActor; hop via a Task so the closure handed to
         // runVerification stays non-isolated.
@@ -60,6 +83,48 @@ struct PipelineCLI {
         }
         failures += await runVerification("VimKeymap: save/load roundtrip preserves marks/labels/picks") {
             try await Task { @MainActor in try await vimSaveLoadRoundtrip() }.value
+        }
+        failures += await runVerification("VimKeymap: folder rename preserves culling state") {
+            try await Task { @MainActor in try await vimStateSurvivesFolderRename() }.value
+        }
+        failures += await runVerification("VimKeymap: a deleted folder's state never leaks to its replacement") {
+            try await Task { @MainActor in try await vimStateDoesNotLeakToReplacementFolder() }.value
+        }
+        failures += await runVerification("VimKeymap: legacy path state never leaks to a replacement folder") {
+            try await Task { @MainActor in try await vimLegacyStateDoesNotLeakToReplacementFolder() }.value
+        }
+        failures += await runVerification("VimKeymap: legacy path state never leaks to an unrelated moved-in folder") {
+            try await Task { @MainActor in try await vimLegacyStateDoesNotLeakToMovedInFolder() }.value
+        }
+        failures += await runVerification("VimKeymap: unverifiable bookmarks never fork a second folder reference") {
+            try await Task { @MainActor in try await vimUnverifiableBookmarkDoesNotForkState() }.value
+        }
+        failures += await runVerification("VimKeymap: a retargeted legacy symlink requires confirmation") {
+            try await Task { @MainActor in try await vimLegacySymlinkRetargetRequiresConfirmation() }.value
+        }
+        failures += await runVerification("VimKeymap: a retargeted ancestor symlink requires confirmation") {
+            try await Task { @MainActor in try await vimLegacyAncestorSymlinkRetargetRequiresConfirmation() }.value
+        }
+        failures += await runVerification("VimKeymap: version-2 resource state follows a rename into bookmark storage") {
+            try await Task { @MainActor in try await vimResourceIdentityStateSurvivesRenameMigration() }.value
+        }
+        failures += await runVerification("VimKeymap: version-1 path state migrates to a durable folder bookmark") {
+            try await Task { @MainActor in try await vimLegacyPathStateMigratesToStableIdentity() }.value
+        }
+        failures += await runVerification("VimKeymap: conflicting migration sources fail closed") {
+            try await Task { @MainActor in try await vimConflictingStateSourcesFailClosed() }.value
+        }
+        failures += await runVerification("VimKeymap: a loaded keymap refuses a replacement on first save") {
+            try await Task { @MainActor in try await vimBoundKeymapRefusesReplacementOnFirstSave() }.value
+        }
+        failures += await runVerification("VimKeymap: background write failures are observable") {
+            try await Task { @MainActor in try await vimBackgroundSaveReportsWriteFailure() }.value
+        }
+        failures += await runVerification("VimKeymap: lifecycle flush supersedes a queued background snapshot") {
+            try await Task { @MainActor in try await vimLifecycleSaveSupersedesQueuedBackgroundSnapshot() }.value
+        }
+        failures += await runVerification("VimKeymap: older callbacks cannot clear a newer lifecycle-save failure") {
+            try await Task { @MainActor in try await vimOlderBackgroundCompletionCannotClearNewerSaveFailure() }.value
         }
         failures += await runVerification("VimKeymap: an unreadable state file yields an empty keymap, not the last folder's") {
             try await Task { @MainActor in try await vimLoadFailureYieldsAnEmptyKeymap() }.value
@@ -102,6 +167,8 @@ struct PipelineCLI {
         failures += await runVerification("ArchiveExtractor: rejects unsupported extensions", check: archiveExtractRejectsBadFormat)
         failures += await runVerification("ArchiveExtractor: rejects symlinks that escape the extraction root", check: archiveRejectsEscapingSymlink)
         failures += await runVerification("ArchiveExtractor: enforces expanded-file resource limits", check: archiveRejectsExpandedFileOverLimit)
+        failures += await runVerification("FolderPathMapper: handles Darwin aliases and directory symlink roots", check: folderPathMapperHandlesAliasesAndSymlinkRoots)
+        failures += await runVerification("RecursiveFolderWatcher: reports deep add/modify/rename/remove and stops cleanly", check: recursiveFolderWatcherTracksDeepChanges)
 
         // Optional: real-photo smoke test. Set PV_TEST_FOLDER=/some/path with
         // real JPEG/HEIC/PNG to exercise the full pipeline end-to-end on
@@ -575,7 +642,7 @@ func embeddingIndexRoundTrip() async throws {
         relativePath: "subdir/photo.jpg",
         embedding: EmbeddingVector(Array(repeating: Float(0.5), count: 512)).normalized(),
         fileSize: 12345,
-        modifiedAt: Date(timeIntervalSince1970: 1700000000)
+        modifiedAt: Date(timeIntervalSince1970: 1_700_000_000.123_456_7)
     )
     await index.upsert(entry)
     try await index.save()
@@ -589,6 +656,8 @@ func embeddingIndexRoundTrip() async throws {
     try require(got?.fileSize == 12345, "fileSize lost in roundtrip")
     try require(abs((got?.embedding.values[0] ?? 0) - entry.embedding.values[0]) < 1e-5,
                 "embedding values changed in roundtrip")
+    try require(got?.modifiedAt == entry.modifiedAt,
+                "sub-second modification timestamp changed in roundtrip")
 }
 
 // MARK: - Tokenizer verifications

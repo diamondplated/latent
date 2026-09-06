@@ -401,12 +401,13 @@ final class EnhancementState {
     func loadInput(
         url: URL,
         prefetched: CGImage? = nil,
-        previewTask: Task<CGImage?, Never>? = nil
+        previewTask: Task<CGImage?, Never>? = nil,
+        forceReload: Bool = false
     ) async {
         // If the user re-clicks the same URL we're already on, do nothing —
         // avoids a redundant re-decode and pipeline run when the selection
         // change in DetailView fires `.task(id:)` on the same URL.
-        if currentURL == url, originalBuffer != nil { return }
+        if !forceReload, currentURL == url, originalBuffer != nil { return }
 
         // Navigation can interrupt a slider gesture before its commit
         // callback. Persist any dirty values against the old URL before the

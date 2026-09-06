@@ -40,17 +40,19 @@ files stay exactly where they are, and everything the app can do runs on your ow
 - 🗂 **Folder-first.** Drag a folder in, or `open -a Latent ~/Pictures/2024`. No import step, no
   catalog file, no migration when you change your mind.
 - ⌨️ **Vim keymap.** `j`/`k`, `gg`/`G`, marks, picks, rejects, colour labels. If you've culled a
-  shoot before, your fingers already know it.
+  shoot before, your fingers already know it. Saved culling state follows folder renames and moves
+  on the same volume.
 - ✨ **Four-stage enhancement**, all local — upscale, denoise, artifact removal, sharpen — with
   live A/B compare and non-destructive sidecars.
-- 🔎 **Search your own photos by description.** CLIP embeddings, indexed per folder, computed on
-  your Mac — though nothing in the app starts an indexing pass yet, so there is nothing to query
-  ([status](#status-and-limits)).
+- 🔎 **Search your own photos locally.** Press `⌘F`, explicitly index the folder, then search by
+  description or find visually similar photos. Search needs OpenCLIP assets you supply; Latent
+  never downloads them automatically.
 - 🌍 **Map view** from EXIF GPS, and Quick Look rendering.
 - 🚫 **Zero runtime network calls by default.** Three things reach the network, each because you
   asked for it: a setup script you run yourself, once, to fetch model weights; the map view, which
   is MapKit and fetches its tiles from Apple while it is open; and the optional phone companion
-  below, which you switch on per session and which never leaves your LAN.
+  below, which you switch on per session and which never leaves your LAN. Browsing, indexing, and
+  searching never trigger an automatic download.
 
 ---
 
@@ -63,13 +65,18 @@ brew install --cask diamondplated/tap/latent
 Or grab the zip from [Releases](https://github.com/diamondplated/latent/releases/latest)
 (Apple silicon, macOS 14+).
 
-**macOS will block the first launch** — this build is ad-hoc signed, not notarized, because the
-project has no Apple Developer ID. Approve it once under **System Settings → Privacy & Security**,
-or strip the quarantine attribute yourself if you trust the build:
+**macOS will block the first launch** — the current downloadable build is ad-hoc signed and is not
+notarized. Ad-hoc signing seals the app for local execution, but it is not an Apple-trusted
+Developer ID signature. Approve it once under **System Settings → Privacy & Security**, or strip
+the quarantine attribute yourself if you trust the build:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Latent.app
 ```
+
+The packaging script can use a Developer ID Application identity when
+`LATENT_SIGNING_IDENTITY` is set, but the project does not yet automate notarization or stapling.
+The script's default remains ad-hoc signing for local and CI builds.
 
 The downloadable build ships no model weights — see [below](#quick-start). It works without them.
 
@@ -102,6 +109,11 @@ pip install -r scripts/requirements.txt
 ./scripts/setup_models.sh
 ```
 
+Running that script is the explicit model-download step; the app never fetches models in the
+background. It also prepares the OpenCLIP image encoder, text encoder, and tokenizer used by
+semantic search. Run it before `scripts/build_app.sh` if you want those local assets included in
+your own app bundle.
+
 > See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) for what each model is. All four are
 > permissively licensed, and downloads are checksum-verified.
 
@@ -122,12 +134,17 @@ not something `Info.plist` can fix. The drag and command-line paths above are th
 
 **Browsing.** Folder tree sidebar (collapsible, lazy, `⌘L`), thumbnail grid with colour labels and
 pick/reject state, non-recursive by default with an opt-in **Include Subfolders**, sort by name or
-recently-modified, live filesystem watching, and predictive prefetch so the next image is already
-decoded.
+recently-modified, and predictive prefetch so the next image is already decoded. Filesystem changes
+refresh the view live; with **Include Subfolders** enabled, the watcher covers the entire subtree,
+including deep additions, removals, and renames.
 
 **Culling.** The vim keymap is the point: `j`/`k` to move, `gg`/`G` for ends, `m`+letter to set a
 mark and `'`+letter to jump back, digits for colour labels, `⇧P` to pick, one-click trash with `⌘Z`
-undo, and bulk select for batch operations.
+undo, and bulk select for batch operations. Marks, labels, picks, and rejects are stored outside the
+photo folder under a durable macOS folder reference, so they survive renaming the folder or moving
+it elsewhere on the same volume. The first time v0.3 finds path-only culling state from v0.2, it
+asks you to confirm that this is the same folder before importing; declining leaves the old file
+untouched and keeps culling disabled for that folder.
 
 **Viewing.** Synced zoom and pan (0.25–16×, drag to pan, pinch to zoom, double-tap to cycle
 2×→3×→4×→1×), animated GIFs, video playback, and a map view built from EXIF GPS.
@@ -136,9 +153,14 @@ undo, and bulk select for batch operations.
 side-by-side, hold `B` to blink), and `.enhance.json` sidecars so your edits are non-destructive and
 diffable.
 
-**Searching.** Query a folder by image similarity or by typed description. Embeddings are OpenCLIP
-ViT-B/32, 512-dimensional, persisted per folder and staleness-aware. The indexing pass that fills
-that index has no trigger yet — see [Status and limits](#status-and-limits).
+**Searching.** Press `⌘F` to open folder-scoped semantic search. Opening the search UI only inspects
+the saved index; indexing starts when you choose **Index This Folder**, and stale indexes refresh
+only when you explicitly request it. Progress and cancellation stay in the search panel. Once
+indexed, you can type a description or use **Find Similar** on the current photo. Embeddings are
+OpenCLIP ViT-B/32, 512-dimensional, persisted locally per folder, and checked for stale files.
+Indexing and Find Similar require a user-supplied OpenCLIP image encoder; text search additionally
+requires the text encoder and tokenizer. No search action uploads a photo, contacts a service, or
+downloads a model.
 
 ---
 
@@ -147,7 +169,7 @@ that index has no trigger yet — see [Status and limits](#status-and-limits).
 Browse and cull a folder from your phone, over your own network. Turn it on, scan the QR code on
 your Mac, and the phone becomes a second input device — swipe up to pick, down to reject, sideways
 to move, long press to set a colour label. Every gesture goes through the same code path a keystroke
-does and lands in the same per-folder sidecar, so the two screens never disagree.
+does and lands in the same saved folder state, so the two screens never disagree.
 
 - **Off unless you turn it on.** No listener exists until you do, and it stops when you quit Latent.
 - **Your LAN only.** Connections from outside a private address range are refused. There is no
@@ -194,7 +216,7 @@ files.
   against macOS 15. If you are on an older Xcode you may hit compile errors in the CoreGraphics and
   CoreML bridges.
 - Full Xcode (not just CommandLineTools) for `swift test`. `swift run pv-pipeline` runs anywhere and
-  covers the same scenarios.
+  provides broad executable verification without XCTest.
 
 ---
 
@@ -203,11 +225,12 @@ files.
 ```bash
 swift build
 swift run pv-pipeline      # assert-based, no Xcode and no models needed
-swift test                 # XCTest target, 30 tests, needs Xcode
+swift test                 # XCTest suites, needs Xcode
 ```
 
 `pv-pipeline` exercises cache behaviour, sidecar round-trips, image I/O and EXIF orientation,
-tiling, search primitives, vim state, GPS extraction, Quick Look, and archive extraction.
+tiling, search indexing, durable vim state, recursive folder watching, GPS extraction, Quick Look,
+and archive extraction.
 
 ---
 
@@ -286,17 +309,20 @@ forget in five places.
 
 ## Status and limits
 
-Latent is pre-1.0. It is a working app, not a shipped product:
+Latent is pre-1.0. It is a working app, not a finished distribution:
 
-- Packaging is SwiftPM plus a script. `scripts/build_app.sh` produces a usable `.app`, but code
-  signing, sandbox entitlements, notarization, and App Store packaging need a proper Xcode project.
+- Packaging is SwiftPM plus a script. `scripts/build_app.sh` produces and verifies a usable `.app`
+  with ad-hoc signing by default, or Developer ID signing when you supply an identity. Notarization,
+  stapling, sandbox entitlements, and App Store packaging are not automated yet.
 - The Quick Look extension target isn't built yet — `PhotoQuickLook.QuickLookRenderer` is written
   and ready for it.
 - Display is not yet Metal-backed, so HDR and wide-gamut rendering aren't what they could be.
-- Search cannot be used yet. `SearchEngine` indexes a folder and queries the index, and the phone
-  companion reads one when it finds it, but nothing in the app or the CLI calls `indexFolder`, so
-  no index gets built. Both text search and image-to-image similarity also need the converted
-  OpenCLIP assets.
+- Semantic search is optional rather than turnkey: OpenCLIP assets are not shipped, are never
+  downloaded automatically, and must be supplied or generated locally. Each folder must also be
+  indexed explicitly from the `⌘F` search panel before it can be queried.
+- The v0.3 culling-state upgrade is forward-only. After a folder's v0.2 path-keyed state migrates
+  to its durable folder reference, continue with v0.3 or newer; alternating with v0.2 can create a
+  separate legacy state that older builds cannot reconcile with the durable store.
 
 ---
 

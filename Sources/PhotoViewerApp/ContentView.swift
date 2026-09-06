@@ -1,7 +1,8 @@
 import SwiftUI
+import AppKit
 
 struct ContentView: View {
-    @State private var state = AppState()
+    @Bindable var state: AppState
     /// Hoisted to the window level so Export Copy remains available through
     /// Command-S even while its optional side panel is closed.
     @State private var enhanceState = EnhancementState()
@@ -46,7 +47,24 @@ struct ContentView: View {
             PairingSheet(controller: state.phoneAccess, ui: state.phoneAccess.ui)
         }
         .onAppear { keyMonitor.install(state: state, enhancementState: enhanceState) }
-        .onDisappear { keyMonitor.uninstall() }
+        .onDisappear {
+            // Closing the window can destroy this view (and therefore its
+            // termination subscription) before the process itself exits. The
+            // app owns `state`, so a failed flush remains recoverable after the
+            // window closes; bring the window back to surface the error.
+            let didFlush = state.flushCullingState()
+            keyMonitor.uninstall()
+            if !didFlush {
+                Task { @MainActor in
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.windows.first(where: { $0.canBecomeKey })?
+                        .makeKeyAndOrderFront(nil)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            state.flushCullingState()
+        }
         // Right-click in Finder → "Open With → Latent" delivers the URL
         // here. Works for both folders (open as a folder) and individual
         // images (open the parent folder, jump to the clicked image).
@@ -70,7 +88,12 @@ struct ContentView: View {
                 set: { if !$0 { state.clearUserError() } }
             )
         ) {
-            Button("OK", role: .cancel) { state.clearUserError() }
+            if state.canUseUnverifiedCullingState {
+                Button("Use Saved Culls") { state.useUnverifiedCullingState() }
+                Button("Keep Disabled", role: .cancel) { state.clearUserError() }
+            } else {
+                Button("OK", role: .cancel) { state.clearUserError() }
+            }
         } message: {
             Text(state.userError ?? "")
         }

@@ -19,9 +19,88 @@ struct BrowserView: View {
     @State private var locationCache = PhotoLocationCache()
     @State private var mode: BrowseMode = .grid
     @State private var showShortcutOverlay = false
+    @State private var showSearch = false
+    @State private var searchFocusRequest = 0
+    @State private var searchState = DesktopSearchState()
     @FocusState private var viewerFocused: Bool
 
     var body: some View {
+        browserChrome
+        // Folder switch hooks.
+        .onChange(of: state.folder) { _, newFolder in
+            state.searchResultURLs = nil
+            searchState.bind(folder: newFolder, readOnly: state.isBrowsingArchive)
+            state.photoFilter = .all
+            // Forget GPS cache for the previous folder. We'll lazy-rebuild
+            // when the user actually opens the map view.
+            locationCache.reset()
+        }
+        .onChange(of: state.folderLoadTick) {
+            // A direct/recursive mode switch can reload the same URL, so the
+            // folder onChange above will not fire. Retire any ranking captured
+            // against the old browser population; the user can rerun it once
+            // the new snapshot has settled.
+            state.searchResultURLs = nil
+            searchState.resetForFolderReload()
+        }
+        .onChange(of: state.browserFilterResetTick) {
+            searchState.resetForExternalSelection()
+        }
+        // GPS extraction is the single biggest cost in the load path
+        // (header reads on every photo) — only kick it off when the user
+        // actually wants the map view, not on every folder open.
+        .onChange(of: mode) { _, newMode in
+            browseModeChanged(to: newMode)
+        }
+        // If the user opens a folder while ALREADY in map mode, fire the
+        // first GPS pass once the scan settles. Watch isLoading rather than
+        // imageURLs so we don't re-fire per batch.
+        .onChange(of: state.isLoading) { _, nowLoading in
+            if !nowLoading, mode == .map {
+                rebuildMapLocations(for: state.imageURLs)
+            }
+            if !nowLoading, showSearch {
+                searchState.refreshIndexStatus()
+            }
+        }
+        .onChange(of: state.folderContentsChangeTick) {
+            guard showSearch, !state.isLoading else { return }
+            searchState.noteFolderContentsChanged()
+        }
+        // A URL-array change catches watcher additions/removals; the content
+        // tick also catches an EXIF/GPS rewrite at the same pathname. Resetting
+        // cancels any older metadata pass so removed markers cannot reappear.
+        .onChange(of: state.imageURLs) { _, urls in
+            guard mode == .map else { return }
+            rebuildMapLocations(for: urls)
+        }
+        .onChange(of: state.browserContentChangeTick) {
+            guard mode == .map else { return }
+            rebuildMapLocations(for: state.imageURLs)
+        }
+        .onChange(of: searchState.resultFilter) { _, results in
+            state.searchResultURLs = results
+        }
+        .onChange(of: filteredURLs) { _, urls in
+            reconcileSelection(with: urls)
+        }
+        .onChange(of: state.selectedIndex) {
+            if !state.isSearchFieldFocused { viewerFocused = true }
+            if !canEnhanceCurrent { state.showEnhancementPanel = false }
+        }
+        .onAppear {
+            viewerFocused = true
+            searchState.bind(folder: state.folder, readOnly: state.isBrowsingArchive)
+        }
+        .onDisappear {
+            searchState.cancelAllOperations()
+            state.searchResultURLs = nil
+            state.isSearchFieldFocused = false
+            enhanceState.reset()
+        }
+    }
+
+    private var browserChrome: some View {
         HSplitView {
             // Far-left pane: folder tree (collapsible). Default off — toggled
             // from the toolbar — so the layout stays simple unless the user
@@ -38,16 +117,16 @@ struct BrowserView: View {
         .focusable()
         .focused($viewerFocused)
         .focusEffectDisabled()
-        .overlay {
-            if showShortcutOverlay {
-                KeyboardShortcutOverlay(isPresented: $showShortcutOverlay)
-            }
-        }
+        .overlay { shortcutOverlay }
         // B is special: hold-to-blink the original. Need both `.down` and
         // `.up` phases so we can release the override when the key lifts.
         .onKeyPress(phases: [.down, .up]) { press in handleBlinkKey(press) }
         .onKeyPress(phases: .down) { press in handleKey(press) }
-        .toolbar {
+        .toolbar { browserToolbar }
+    }
+
+    @ToolbarContentBuilder
+    private var browserToolbar: some ToolbarContent {
             ToolbarItem(placement: .navigation) {
                 Button {
                     state.showFolderTree.toggle()
@@ -99,6 +178,16 @@ struct BrowserView: View {
                 .pickerStyle(.segmented)
             }
             ToolbarItem(placement: .primaryAction) {
+                Button {
+                    presentSearch()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .help("Search this folder (⌘F)")
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(state.folder == nil || state.isLoading || state.isBrowsingArchive)
+            }
+            ToolbarItem(placement: .primaryAction) {
                 photoSortMenu
             }
             ToolbarItem(placement: .primaryAction) {
@@ -128,60 +217,6 @@ struct BrowserView: View {
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(!canEnhanceCurrent)
             }
-        }
-        // Folder switch hooks.
-        .onChange(of: state.folder) { _, newFolder in
-            if let folder = newFolder {
-                // A failed load must still replace the keymap. Keeping the
-                // previous folder's picks, labels and marks means the next
-                // pick re-saves them into *this* folder's state file, where
-                // `VimKeymap.relativePath` writes them as absolute paths into
-                // the old folder — corrupt, deterministic and session-long.
-                do {
-                    state.vimKeymap = try VimKeymap.load(folder: folder)
-                } catch {
-                    state.vimKeymap = VimKeymap()
-                    // Worth an alert: the picks and labels are simply gone for
-                    // this session, and a silent reset looks like the app lost
-                    // them. The raw error stays out of it — a decoding dump is
-                    // not something to put in front of someone.
-                    state.lastError = "Couldn't read the saved picks and labels for this folder, so it's starting fresh."
-                }
-            }
-            state.photoFilter = .all
-            // Forget GPS cache for the previous folder. We'll lazy-rebuild
-            // when the user actually opens the map view.
-            locationCache.reset()
-        }
-        // GPS extraction is the single biggest cost in the load path
-        // (header reads on every photo) — only kick it off when the user
-        // actually wants the map view, not on every folder open.
-        .onChange(of: mode) { _, newMode in
-            if newMode == .map {
-                // Map currently represents the whole opened folder. Clear a
-                // grid-only culling filter so a cluster cannot select an item
-                // that is hidden when the UI returns to the grid.
-                state.photoFilter = .all
-                Task { await locationCache.locate(state.imageURLs) }
-            }
-        }
-        // If the user opens a folder while ALREADY in map mode, fire the
-        // first GPS pass once the scan settles. Watch isLoading rather than
-        // imageURLs so we don't re-fire per batch.
-        .onChange(of: state.isLoading) { _, nowLoading in
-            if !nowLoading, mode == .map {
-                Task { await locationCache.locate(state.imageURLs) }
-            }
-        }
-        .onChange(of: filteredURLs) { _, urls in
-            reconcileSelection(with: urls)
-        }
-        .onChange(of: state.selectedIndex) {
-            viewerFocused = true
-            if !canEnhanceCurrent { state.showEnhancementPanel = false }
-        }
-        .onAppear { viewerFocused = true }
-        .onDisappear { enhanceState.reset() }
     }
 
     /// Reads through `state` so Observation tracking sees the same source
@@ -189,8 +224,27 @@ struct BrowserView: View {
     private var vimKeymap: VimKeymap { state.vimKeymap }
 
     @ViewBuilder
+    private var shortcutOverlay: some View {
+        if showShortcutOverlay {
+            KeyboardShortcutOverlay(isPresented: $showShortcutOverlay)
+        }
+    }
+
+    @ViewBuilder
     private var sidebar: some View {
         VStack(spacing: 0) {
+            if showSearch {
+                DesktopSearchBar(
+                    state: searchState,
+                    currentURL: state.currentURL,
+                    visibleURLs: state.imageURLs,
+                    currentVisibleURLs: { state.imageURLs },
+                    focusRequest: searchFocusRequest,
+                    onFocusChange: { state.isSearchFieldFocused = $0 },
+                    onClose: closeSearch
+                )
+                Divider()
+            }
             if state.isBrowsingArchive {
                 archiveReadOnlyBanner
                 Divider()
@@ -348,7 +402,7 @@ struct BrowserView: View {
                     .background(Capsule().fill(Color.accentColor))
             } else if !state.imageURLs.isEmpty {
                 let total = state.imageURLs.count
-                if state.photoFilter != .all {
+                if state.photoFilter != .all || state.searchResultURLs != nil {
                     Text("\(filteredURLs.count) of \(total)")
                         .font(.system(.callout, design: .monospaced))
                         .monospacedDigit()
@@ -388,8 +442,12 @@ struct BrowserView: View {
                             isPicked: vimKeymap.isPicked(url),
                             isRejected: vimKeymap.isRejected(url),
                             size: CGFloat(thumbnailSize),
+                            contentRevision: state.browserContentChangeTick,
                             allowsTrash: !state.isBrowsingArchive,
-                            onTrash: { state.trashImage(at: url) }
+                            onTrash: { state.trashImage(at: url) },
+                            onFindSimilar: canFindSimilar(url)
+                                ? { findSimilar(to: url) }
+                                : nil
                         )
                         .id(url)
                         .accessibilityElement(children: .ignore)
@@ -466,7 +524,54 @@ struct BrowserView: View {
     }
 
     private var filteredURLs: [URL] {
-        state.photoFilter.apply(to: state.imageURLs, keymap: vimKeymap)
+        state.visibleImageURLs
+    }
+
+    private func presentSearch() {
+        mode = .grid
+        showSearch = true
+        searchFocusRequest &+= 1
+        searchState.bind(folder: state.folder, readOnly: state.isBrowsingArchive)
+        searchState.refreshIndexStatus()
+    }
+
+    private func browseModeChanged(to newMode: BrowseMode) {
+        guard newMode == .map else { return }
+        // Map currently represents the whole opened folder. Clear grid-only
+        // filters so a cluster cannot select an item hidden on return.
+        state.photoFilter = .all
+        state.searchResultURLs = nil
+        searchState.clearResults()
+        // Changes that happened while the grid was visible intentionally did
+        // not spend work on GPS. Rebuild on every transition so deleted URLs
+        // and same-path EXIF rewrites cannot leave stale map markers behind.
+        rebuildMapLocations(for: state.imageURLs)
+    }
+
+    private func rebuildMapLocations(for urls: [URL]) {
+        locationCache.reset()
+        Task { await locationCache.locate(urls) }
+    }
+
+    private func closeSearch() {
+        searchState.resetForClose()
+        state.searchResultURLs = nil
+        state.isSearchFieldFocused = false
+        showSearch = false
+        viewerFocused = true
+    }
+
+    private func canFindSimilar(_ url: URL) -> Bool {
+        guard !state.isBrowsingArchive else { return false }
+        switch MediaTyping.detect(url) {
+        case .staticImage, .animatedImage: return true
+        case .video, .unsupported: return false
+        }
+    }
+
+    private func findSimilar(to url: URL) {
+        presentSearch()
+        searchState.findSimilar(to: url, visibleURLs: state.imageURLs)
     }
 
     private var canEnhanceCurrent: Bool {
@@ -520,6 +625,7 @@ struct BrowserView: View {
     /// other keys propagate to `handleKey` (the vim dispatcher).
     @MainActor
     private func handleBlinkKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !state.isSearchFieldFocused else { return .ignored }
         guard !showShortcutOverlay else { return .ignored }
         guard canEnhanceCurrent else { return .ignored }
         guard press.key.character == "b" || press.key.character == "B" else {
@@ -541,6 +647,7 @@ struct BrowserView: View {
     /// (`.next/.prev/.first/.last/.jumpToMark`).
     @MainActor
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !state.isSearchFieldFocused else { return .ignored }
         if showShortcutOverlay {
             showShortcutOverlay = false
             return .handled
@@ -549,6 +656,7 @@ struct BrowserView: View {
             showShortcutOverlay = true
             return .handled
         }
+        guard state.ensureActiveFolderContinuity() else { return .handled }
 
         if state.isBrowsingArchive {
             let character = press.key.character
@@ -556,6 +664,15 @@ struct BrowserView: View {
                 || character == "m" || character.wholeNumberValue != nil
             if isCullingEdit {
                 state.lastError = "Archive previews are read-only. Extract the archive in Finder before saving culling changes."
+                return .handled
+            }
+        }
+        if state.isCullingPersistenceBlocked {
+            let character = press.key.character
+            let isCullingEdit = character == "P" || character == "X"
+                || character == "m" || character.wholeNumberValue != nil
+            if isCullingEdit {
+                state.reportBlockedCullingEdit()
                 return .handled
             }
         }
@@ -637,12 +754,18 @@ struct ThumbnailCell: View {
     let isPicked: Bool
     let isRejected: Bool
     let size: CGFloat
+    /// Restarts the visible cell load after a filesystem batch. Unchanged
+    /// files hit ThumbnailLoader's cache; overwritten files were evicted.
+    let contentRevision: UInt64
     /// False for temporary archive previews, whose files must not be moved.
     let allowsTrash: Bool
     /// One-click trash. Called from the hover-revealed X and the right-
     /// click context menu — kept as a closure so the cell doesn't need
     /// AppState injected through every preview path.
     let onTrash: () -> Void
+    /// Optional because videos and unsupported media cannot be embedded by
+    /// the image-only OpenCLIP index.
+    let onFindSimilar: (() -> Void)?
 
     @State private var image: CGImage? = nil
     @State private var hovered: Bool = false
@@ -757,6 +880,11 @@ struct ThumbnailCell: View {
             ShareLink(item: url) {
                 Label("Share…", systemImage: "square.and.arrow.up")
             }
+            if let onFindSimilar {
+                Button(action: onFindSimilar) {
+                    Label("Find Similar", systemImage: "photo.on.rectangle.angled")
+                }
+            }
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } label: {
@@ -771,7 +899,7 @@ struct ThumbnailCell: View {
                 }
             }
         }
-        .task(id: url) {
+        .task(id: contentRevision) {
             image = nil
             hovered = false
             didFail = false

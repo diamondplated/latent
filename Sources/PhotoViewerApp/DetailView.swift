@@ -36,7 +36,10 @@ struct DetailView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: state.showEnhancementPanel)
-        .task(id: currentURL) {
+        .task(id: MediaContentIdentity(
+            url: currentURL,
+            revision: state.selectedMediaContentTick
+        )) {
             // Update the prefetch window FIRST — this both seeds the cache
             // for next-press neighbors and lets us hand a cache hit
             // straight to loadCurrent. Sync call (no await), instant
@@ -197,13 +200,19 @@ struct DetailView: View {
                     .scaleEffect(zoom * transientZoom)
                     .offset(x: pan.width + transientPan.width,
                             y: pan.height + transientPan.height)
-                    .id(url)
+                    .id(MediaContentIdentity(
+                        url: url,
+                        revision: state.selectedMediaContentTick
+                    ))
             }
         case (_, .video):
             if let url = currentURL {
                 VideoPlaybackView(url: url)
                     .padding(8)
-                    .id(url)
+                    .id(MediaContentIdentity(
+                        url: url,
+                        revision: state.selectedMediaContentTick
+                    ))
             }
         case (_, .unsupported):
             VStack(spacing: 6) {
@@ -415,8 +424,18 @@ struct DetailView: View {
         // promoted and awaited rather than decoded twice.
         let cached = state.prefetcher.image(for: url)
         let previewTask = cached == nil ? state.prefetcher.foregroundDecode(for: url) : nil
-        await enhanceState.loadInput(url: url, prefetched: cached, previewTask: previewTask)
+        await enhanceState.loadInput(
+            url: url,
+            prefetched: cached,
+            previewTask: previewTask,
+            forceReload: true
+        )
     }
+}
+
+private struct MediaContentIdentity: Hashable {
+    let url: URL?
+    let revision: UInt64
 }
 
 // MARK: - Bridge so BrowserView can drive blink + view-mode without

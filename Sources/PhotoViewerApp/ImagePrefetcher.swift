@@ -250,7 +250,11 @@ final class ImagePrefetcher {
     func evict(url: URL) {
         requestedURLs.remove(url)
         requestedNeighbors.removeAll { $0 == url }
-        if let job = jobs[url], job.operation.cancelIfQueued() {
+        if let job = jobs[url] {
+            _ = job.operation.cancelIfQueued()
+            // Even a running ImageIO operation must lose its cache identity.
+            // It can finish physically, but finishDecode's UUID gate will
+            // discard it while a fresh same-URL request starts a new job.
             jobs.removeValue(forKey: url)
         }
         entries.removeAll { $0.url == url }
@@ -265,13 +269,12 @@ final class ImagePrefetcher {
         requestedNeighbors.removeAll()
         for url in Array(jobs.keys) {
             guard let job = jobs[url] else { continue }
-            // Queued work is pruned immediately. Running jobs stay registered
-            // only until ImageIO returns, preserving the physical concurrency
-            // gate and same-URL deduplication without retaining their result.
-            if job.operation.cancelIfQueued() {
-                jobs.removeValue(forKey: url)
-            }
+            _ = job.operation.cancelIfQueued()
         }
+        // Running ImageIO cannot be interrupted, but removing every identity
+        // prevents a same-URL request in the new generation from reusing or
+        // committing its stale result.
+        jobs.removeAll()
         entries.removeAll()
         totalCost = 0
     }

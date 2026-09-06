@@ -6,8 +6,9 @@ import PhotoIO
 import PhotoViewerCore
 
 /// Holds the currently-selected folder and the list of image URLs in it.
-/// Watches the folder for changes via DispatchSource so adds/removes update
-/// the grid in near-real-time.
+/// Watches the folder for changes so adds/removes update the grid in near-real
+/// time. A debounced FSEvents stream observes the subtree; direct browsing
+/// still reconciles with a cheap, nonrecursive directory scan.
 ///
 /// Composes `SelectionManager` and `TrashManager` for focused state
 /// management. Backward-compatible API wrappers delegate to the sub-objects.
@@ -82,6 +83,22 @@ final class AppState {
     /// input device — the phone companion dispatches the same `VimAction`
     /// values through `dispatch(_:)`. One owner, one writer.
     var vimKeymap = VimKeymap()
+    /// A corrupt or newer on-disk state file is never replaced implicitly.
+    /// Browsing remains available, but all culling mutations stay disabled
+    /// until the user repairs the file or opens it with a compatible build.
+    private(set) var isCullingPersistenceBlocked = false
+    /// A v0.2/resource fallback that exists but cannot be tied to the current
+    /// directory automatically. The UI offers an explicit, reversible choice:
+    /// import it only when the user recognizes this as the original folder.
+    private var pendingUnverifiedCullingFolder: URL?
+    /// Keep the confirmation action coupled to its exact warning. The pending
+    /// folder intentionally survives dismissal so a later culling attempt can
+    /// offer the choice again, but an unrelated watcher/trash/save error must
+    /// never inherit the "Use Saved Culls" button.
+    var canUseUnverifiedCullingState: Bool {
+        pendingUnverifiedCullingFolder != nil
+            && userError == Self.unverifiedCullingStateMessage
+    }
 
     /// Whether the enhancement side panel is visible. Default false: the app
     /// is primarily a viewer; enhancement is opt-in. Toolbar button toggles.
@@ -92,6 +109,13 @@ final class AppState {
     /// Grid filter is app state (rather than view-local) so window-level
     /// keyboard navigation can stay inside the same visible result set.
     var photoFilter: PhotoFilter = .all
+    /// Ranked semantic-search result URLs, or nil when search is inactive.
+    /// Kept here (rather than only in BrowserView) so window-level j/k and
+    /// arrow navigation follow the same result set the grid displays.
+    var searchResultURLs: [URL]? = nil
+    /// The window-level key monitor must leave arrows, Space, Backspace and
+    /// command editing shortcuts with the semantic-search TextField.
+    var isSearchFieldFocused = false
     /// Sort order applied to folders in the tree sidebar. Persisted across
     /// launches because it's the kind of preference you set once. Default
     /// is alphabetical; "Recently Modified" is the choice for users who
@@ -162,9 +186,16 @@ final class AppState {
                 }
                 let urls = await Self.walkAndSort(currentFolder, recursive: recursive, sort: sort)
                 guard self.folder == currentFolder else { return }
-                self.imageURLs = urls
-                self.selectedIndex = selectedURL.flatMap { urls.firstIndex(of: $0) }
-                    ?? (urls.isEmpty ? nil : 0)
+                guard self.folderContinuityIsCurrent(at: currentFolder) else {
+                    self.closeForFolderContinuityLoss(at: currentFolder)
+                    return
+                }
+                let committedURLs = self.photoSort == sort
+                    ? urls
+                    : Self.sortPhotos(urls, by: self.photoSort, basePath: currentFolder.path)
+                self.imageURLs = committedURLs
+                self.selectedIndex = selectedURL.flatMap { committedURLs.firstIndex(of: $0) }
+                    ?? (committedURLs.isEmpty ? nil : 0)
             }
         }
     }
@@ -184,7 +215,7 @@ final class AppState {
         case scanning(folderName: String, photosFound: Int)
     }
 
-    private var fileWatcher: DispatchSourceFileSystemObject?
+    private var folderChangeWatcher: RecursiveFolderWatcher?
     private var extractedArchiveDir: URL?
     /// Archive contents are previews backed by a temporary extraction tree.
     /// Mutating them would appear to work and then vanish on close, so the UI
@@ -193,17 +224,121 @@ final class AppState {
     private(set) var archiveSourceURL: URL?
     private var loadedRecursively: Bool = false
     private var watcherRescanTask: Task<Void, Never>? = nil
+    private var watcherRescanPending = false
     private var scanTask: Task<Void, Never>? = nil
     private var archiveExtractionTask: Task<URL, Error>? = nil
     private var scanGeneration: UInt64 = 0
+    /// Snapshot of the directory incarnation accepted for the active load.
+    /// Watch callbacks compare it before and after every suspended walk so a
+    /// delete/recreate at the same pathname can never inherit the old browser
+    /// or culling session.
+    private var loadedFolderContinuity: FolderContinuity?
+    /// Advances once per active, debounced filesystem batch, including content
+    /// changes that leave `imageURLs` unchanged. Consumers use this to refresh
+    /// folder-scoped derived data without treating the URL list as a change log.
+    private(set) var folderContentsChangeTick: UInt64 = 0
+    /// Advances only for filesystem activity that can affect the active grid.
+    /// In nonrecursive mode, deeper subtree events still stale the recursive
+    /// search index but do not churn thumbnails or launch a pointless rescan.
+    private(set) var browserContentChangeTick: UInt64 = 0
+    /// Advances at the start of every accepted folder load, including a
+    /// same-URL switch between direct and recursive browsing.
+    private(set) var folderLoadTick: UInt64 = 0
+    /// Signals view-local search UI to retire its query when an external
+    /// controller needs to select from the complete unfiltered folder.
+    private(set) var browserFilterResetTick: UInt64 = 0
+    /// Advances only when the selected media itself may have changed on disk.
+    /// DetailView includes it in view/task identity so a same-URL overwrite
+    /// reloads pixels, enhancement input, playback, and export state.
+    private(set) var selectedMediaContentTick: UInt64 = 0
     var folderTreeChangeTick: Int = 0
     private(set) var lastRemovedFolder: URL? = nil
 
-    var userError: String? { lastError ?? trash.lastError }
+    private struct FolderContinuity: Equatable, Sendable {
+        let resourceIdentity: String?
+        let systemNumber: UInt64?
+        let fileNumber: UInt64?
+        let creationDate: Date?
+
+        func identifiesSameDirectory(as other: FolderContinuity) -> Bool {
+            var hasMatchingEvidence = false
+            if let resourceIdentity, let otherIdentity = other.resourceIdentity {
+                guard resourceIdentity == otherIdentity else { return false }
+                hasMatchingEvidence = true
+            }
+            if let systemNumber, let fileNumber,
+               let otherSystem = other.systemNumber,
+               let otherFile = other.fileNumber {
+                guard systemNumber == otherSystem, fileNumber == otherFile else {
+                    return false
+                }
+                hasMatchingEvidence = true
+            }
+            if let creationDate, let otherCreationDate = other.creationDate {
+                guard creationDate == otherCreationDate else { return false }
+                hasMatchingEvidence = true
+            }
+            return hasMatchingEvidence
+        }
+    }
+
+    var userError: String? {
+        if let lastError { return lastError }
+        if let trashError = trash.lastError { return trashError }
+        if vimKeymap.lastPersistenceError != nil {
+            return "Latent couldn’t save this folder’s picks, rejects, labels, or marks. Your latest culling changes may not survive a relaunch."
+        }
+        return nil
+    }
 
     func clearUserError() {
         lastError = nil
         trash.lastError = nil
+        vimKeymap.clearPersistenceError()
+    }
+
+    func clearBrowserFiltersForExternalSelection() {
+        photoFilter = .all
+        searchResultURLs = nil
+        browserFilterResetTick &+= 1
+    }
+
+    func reportBlockedCullingEdit() {
+        if pendingUnverifiedCullingFolder != nil {
+            reportUnverifiedCullingState()
+            return
+        }
+        lastError = "Saved culling state for this folder couldn’t be safely read or migrated. Picks, rejects, labels, and marks are disabled so Latent won’t overwrite that data. Reopen the folder with a compatible version or repair its saved state first."
+    }
+
+    private static let unverifiedCullingStateMessage = "Latent found older saved picks, rejects, labels, or marks, but this folder changed afterward and its identity can’t be proven. Choose Use Saved Culls only if this is the same folder; otherwise keep culling disabled so the older data remains untouched."
+
+    private func reportUnverifiedCullingState() {
+        lastError = Self.unverifiedCullingStateMessage
+    }
+
+    func useUnverifiedCullingState() {
+        guard let pendingFolder = pendingUnverifiedCullingFolder,
+              folder == pendingFolder,
+              ensureActiveFolderContinuity() else { return }
+        do {
+            let loaded = try VimKeymap.load(
+                folder: pendingFolder,
+                allowUnverifiedMigration: true
+            )
+            vimKeymap = loaded
+            pendingUnverifiedCullingFolder = nil
+            isCullingPersistenceBlocked = loaded.hasUnpersistedChanges
+                && loaded.lastPersistenceError != nil
+            if isCullingPersistenceBlocked {
+                reportBlockedCullingEdit()
+            } else {
+                lastError = nil
+            }
+        } catch {
+            isCullingPersistenceBlocked = true
+            reportUnverifiedCullingState()
+        }
     }
 
     /// Everything Latent will pick up during a folder scan. Static images,
@@ -246,7 +381,13 @@ final class AppState {
     /// individual files open their parent folder and jump selection to the
     /// file if it is part of the current media set.
     func openURL(_ url: URL) async {
-        let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+        // Foundation can report a POSIX directory symlink itself as neither a
+        // regular file nor a directory. Probe the resolved target as well so
+        // Finder/Open With and drag/drop open that folder instead of its
+        // parent.
+        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            || (try? resolvedURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         if isDir || ArchiveExtractor.isArchive(url) {
             await loadFolder(url)
         } else {
@@ -271,6 +412,12 @@ final class AppState {
     ///   non-recursively).
     @discardableResult
     func loadFolder(_ url: URL, setAsAnchor: Bool = true, recursive: Bool = false) async -> Bool {
+        // Finish the latest in-memory culling snapshot before a same-folder
+        // reload or folder switch can replace the keymap from disk. The writer
+        // serializes this lifecycle flush with already queued background saves.
+        guard flushCullingState() else { return false }
+        folderLoadTick &+= 1
+        searchResultURLs = nil
         scanGeneration &+= 1
         let generation = scanGeneration
         let openingArchive = ArchiveExtractor.isArchive(url)
@@ -281,6 +428,7 @@ final class AppState {
 
         // Prevent the previous folder's watcher from committing into this load.
         stopWatching()
+        loadedFolderContinuity = nil
 
         // If a previous scan is still running (rare — user clicked a new
         // folder mid-scan), cancel it and wait for it to drain. The
@@ -301,10 +449,12 @@ final class AppState {
         // Drop the old folder's prefetched images — the new folder's URLs
         // share no overlap, so cached entries are pure memory waste.
         prefetcher.clear()
+        ThumbnailLoader.shared.clear()
 
         selection.reset()
         imageURLs = []
         photoFilter = .all
+        pendingUnverifiedCullingFolder = nil
         lastError = nil
 
         // Archive extraction has no useful partial state. Clear the old folder
@@ -312,6 +462,8 @@ final class AppState {
         // empty with its watcher already torn down.
         if openingArchive {
             folder = nil
+            vimKeymap = VimKeymap()
+            isCullingPersistenceBlocked = false
         }
 
         // Clean up any previous extracted-archive dir so /tmp doesn't fill up
@@ -361,6 +513,71 @@ final class AppState {
             }
         }
 
+        guard let scanRootContinuity = Self.folderContinuity(for: scanRoot) else {
+            if openingArchive {
+                extractedArchiveDir = nil
+                Self.removeArchiveExtractionInBackground(scanRoot)
+            }
+            folder = nil
+            anchorFolder = nil
+            imageURLs = []
+            vimKeymap = VimKeymap()
+            isCullingPersistenceBlocked = false
+            isBrowsingArchive = false
+            archiveSourceURL = nil
+            loadPhase = nil
+            lastError = "Latent couldn’t open that folder because it was moved, removed, or replaced during loading."
+            return false
+        }
+        loadedFolderContinuity = scanRootContinuity
+
+        // AppState owns culling state, so load it before publishing `folder`.
+        // On the first folder opened (and after close/reopen), BrowserView is
+        // created only after `folder` changes and therefore cannot rely on an
+        // onChange hook to initialize this data. Loading here prevents stale
+        // picks from the prior folder being written into the new folder.
+        if isBrowsingArchive {
+            vimKeymap = VimKeymap()
+            isCullingPersistenceBlocked = false
+            pendingUnverifiedCullingFolder = nil
+        } else {
+            do {
+                let loadedKeymap = try VimKeymap.load(folder: scanRoot)
+                vimKeymap = loadedKeymap
+                pendingUnverifiedCullingFolder = nil
+                isCullingPersistenceBlocked = loadedKeymap.hasUnpersistedChanges
+                    && loadedKeymap.lastPersistenceError != nil
+                if isCullingPersistenceBlocked { reportBlockedCullingEdit() }
+            } catch VimKeymapError.folderContinuityUnverifiable {
+                vimKeymap = VimKeymap()
+                pendingUnverifiedCullingFolder = scanRoot
+                isCullingPersistenceBlocked = true
+                reportUnverifiedCullingState()
+            } catch {
+                vimKeymap = VimKeymap()
+                pendingUnverifiedCullingFolder = nil
+                isCullingPersistenceBlocked = true
+                reportBlockedCullingEdit()
+            }
+        }
+        guard Self.folderContinuity(for: scanRoot)?
+            .identifiesSameDirectory(as: scanRootContinuity) == true else {
+            if openingArchive {
+                extractedArchiveDir = nil
+                Self.removeArchiveExtractionInBackground(scanRoot)
+            }
+            loadedFolderContinuity = nil
+            folder = nil
+            anchorFolder = nil
+            imageURLs = []
+            vimKeymap = VimKeymap()
+            isCullingPersistenceBlocked = false
+            isBrowsingArchive = false
+            archiveSourceURL = nil
+            loadPhase = nil
+            lastError = "Latent closed the folder because it was moved, removed, or replaced during loading."
+            return false
+        }
         folder = scanRoot
         if setAsAnchor { anchorFolder = scanRoot }
         loadedRecursively = recursive
@@ -370,6 +587,17 @@ final class AppState {
         // up extraction dirs don't poison the list.
         if !reusingExtraction { recents.push(url) }
         loadPhase = .scanning(folderName: scanRoot.lastPathComponent, photosFound: 0)
+
+        // Install subtree monitoring BEFORE the initial walk. Any
+        // event that lands while the walk is in progress is remembered and
+        // causes one reconciliation afterward, so no change can hide in a
+        // scan-then-start race. The same stream sees in-place content writes;
+        // nonrecursive browsing still performs only a one-directory rescan.
+        startWatching(
+            scanRoot,
+            recursive: recursive,
+            generation: generation
+        )
 
         // Walk on a background task we can cancel from `cancelScan()`.
         // `Task.isCancelled` checks inside the walk let the Stop button
@@ -394,8 +622,18 @@ final class AppState {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 guard self.scanGeneration == generation else { return }
-                self.imageURLs = found
-                self.selectedIndex = found.isEmpty ? nil : 0
+                guard self.folderContinuityIsCurrent(at: scanRoot) else {
+                    self.closeForFolderContinuityLoss(at: scanRoot)
+                    return
+                }
+                // The user can change sort order while this detached scan is
+                // suspended. Reconcile the completed snapshot against the
+                // currently selected order before the atomic commit.
+                let committedURLs = self.photoSort == sort
+                    ? found
+                    : Self.sortPhotos(found, by: self.photoSort, basePath: pathBase)
+                self.imageURLs = committedURLs
+                self.selectedIndex = committedURLs.isEmpty ? nil : 0
                 self.loadPhase = nil
             }
         }
@@ -404,7 +642,14 @@ final class AppState {
         guard generation == scanGeneration else { return false }
         scanTask = nil
 
-        startWatching(scanRoot)
+        if watcherRescanPending {
+            watcherRescanPending = false
+            scheduleWatcherRescan(
+                root: scanRoot,
+                recursive: recursive,
+                generation: generation
+            )
+        }
         return true
     }
 
@@ -467,13 +712,19 @@ final class AppState {
         let imageExtensions = AppState.imageExtensions
         let fm = FileManager.default
         var found: [URL] = []
+        let paths = FolderPathMapper(rootURL: root)
+        // Enumerate a directory symlink through its resolved target. Rebase
+        // every child onto the spelling Latent is actually browsing so
+        // selection, restored culling URLs, search results, and watcher
+        // rescans all share one identity (including /tmp ↔ /private/tmp).
+        let enumerationRoot = paths.enumerationRootURL
 
         if !recursive {
             // Cheap one-shot listing of the folder's direct contents. No
             // streaming — at worst this is a few hundred entries; the
             // scanner UI shouldn't bother flickering for it.
             let items = (try? fm.contentsOfDirectory(
-                at: root,
+                at: enumerationRoot,
                 includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
                 options: [.skipsHiddenFiles]
             )) ?? []
@@ -481,7 +732,7 @@ final class AppState {
                 if Task.isCancelled { break }
                 let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
                 if isFile && imageExtensions.contains(url.pathExtension.lowercased()) {
-                    found.append(url)
+                    found.append(paths.rebaseToRoot(url))
                 }
             }
             if let onProgress { await onProgress(found.count) }
@@ -493,7 +744,7 @@ final class AppState {
         // hidden files. Periodic Task.isCancelled + onProgress hooks let
         // Stop be responsive even on huge trees.
         guard let enumerator = fm.enumerator(
-            at: root,
+            at: enumerationRoot,
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
@@ -510,7 +761,7 @@ final class AppState {
             let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
             guard isFile else { continue }
             guard imageExtensions.contains(url.pathExtension.lowercased()) else { continue }
-            found.append(url)
+            found.append(paths.rebaseToRoot(url))
             sinceTick += 1
             if sinceTick >= tickEvery {
                 sinceTick = 0
@@ -544,6 +795,37 @@ final class AppState {
         }
     }
 
+    /// Capture more than one filesystem signal. Foundation's opaque identity
+    /// is strongest when available; POSIX device/inode plus creation date keep
+    /// the same protection on volumes where bookmark resource identifiers are
+    /// unavailable.
+    private static func folderContinuity(for url: URL) -> FolderContinuity? {
+        let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: canonicalURL.path
+        ), attributes[.type] as? FileAttributeType == .typeDirectory else {
+            return nil
+        }
+        return FolderContinuity(
+            resourceIdentity: VimKeymap.folderIdentity(for: canonicalURL),
+            systemNumber: (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+            fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+            creationDate: attributes[.creationDate] as? Date
+        )
+    }
+
+    private func folderContinuityIsCurrent(at root: URL) -> Bool {
+        guard let loadedFolderContinuity,
+              let current = Self.folderContinuity(for: root) else { return false }
+        return current.identifiesSameDirectory(as: loadedFolderContinuity)
+    }
+
+    private func closeForFolderContinuityLoss(at root: URL) {
+        guard folder == root else { return }
+        closeFolder(persistCulling: false)
+        lastError = "The open folder was moved, removed, or replaced. Latent closed it so saved culling state stays attached to the original folder. Reopen the folder at its current location."
+    }
+
     /// File-watcher rescan path. Honors the load's recursive flag so a
     /// non-recursive folder doesn't trigger a full-tree walk on every fs
     /// event. Cancellable: the watcher cancels an in-flight rescan when a
@@ -555,47 +837,163 @@ final class AppState {
         return Self.sortPhotos(all, by: sort, basePath: basePath)
     }
 
-    private func startWatching(_ url: URL) {
-        fileWatcher?.cancel()
-        let fd = open(url.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .extend, .rename, .delete],
-            queue: .main
-        )
-        // Watching only the root dir — we don't recurse-watch subfolders to
-        // avoid blowing through file-descriptor limits on huge libraries.
-        // Folder-level events still fire when files are added/removed at the
-        // top level; if the user reorganizes a deep subdir while the app is
-        // running they get inconsistent state until they reopen the folder.
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            // Cancel any rescan that's still chewing through the fs from a
-            // previous event in this same burst. A bulk delete or trash
-            // sweep typically fires several events; without coalescing we
-            // ran one full recursive walk per event, which on a 50k-photo
-            // folder hung the app.
-            self.watcherRescanTask?.cancel()
-            // Preserve the user's current selection across the rescan.
-            let previousURL = self.selectedIndex.flatMap { idx in
-                idx < self.imageURLs.count ? self.imageURLs[idx] : nil
-            }
-            let recursive = self.loadedRecursively
-            let sort = self.photoSort
-            self.watcherRescanTask = Task { @MainActor [weak self] in
-                let urls = await Self.walkAndSort(url, recursive: recursive, sort: sort)
-                guard let self else { return }
-                if Task.isCancelled { return }
-                guard self.folder == url else { return }
-                self.imageURLs = urls
-                self.selectedIndex = previousURL.flatMap { urls.firstIndex(of: $0) }
-                                    ?? (urls.isEmpty ? nil : 0)
+    private func startWatching(
+        _ url: URL,
+        recursive: Bool,
+        generation: UInt64
+    ) {
+        folderChangeWatcher?.stop()
+        folderChangeWatcher = nil
+
+        let watcher = RecursiveFolderWatcher(rootURL: url) { [weak self] batch in
+            Task { @MainActor [weak self] in
+                self?.scheduleWatcherRescan(
+                    root: url,
+                    recursive: recursive,
+                    generation: generation,
+                    batch: batch
+                )
             }
         }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        fileWatcher = source
+        do {
+            try watcher.start()
+            folderChangeWatcher = watcher
+        } catch {
+            lastError = "This folder opened, but Latent couldn't monitor it for live changes: \(error.localizedDescription)"
+        }
+    }
+
+    /// Coalesce filesystem activity into one cancellable background snapshot.
+    /// The generation and mode checks reject callbacks already queued when a
+    /// folder is closed, replaced, or reloaded with a different recursion mode.
+    private func scheduleWatcherRescan(
+        root: URL,
+        recursive: Bool,
+        generation: UInt64,
+        batch: RecursiveFolderChangeBatch? = nil
+    ) {
+        guard scanGeneration == generation,
+              folder == root,
+              loadedRecursively == recursive else { return }
+        guard folderContinuityIsCurrent(at: root) else {
+            closeForFolderContinuityLoss(at: root)
+            return
+        }
+
+        // This is intentionally independent of `imageURLs`: overwriting an
+        // existing image produces a meaningful filesystem batch even though
+        // the rescan ultimately yields the same ordered URL array.
+        folderContentsChangeTick &+= 1
+        let viewerBatch = batch.flatMap {
+            viewerRelevantBatch($0, root: root, recursive: recursive)
+        }
+        if batch != nil, viewerBatch == nil { return }
+        browserContentChangeTick &+= 1
+        if let viewerBatch { invalidateMediaCaches(for: viewerBatch, root: root) }
+
+        // A subtree event can arrive while the initial recursive snapshot is
+        // still running. Let that snapshot finish, then reconcile once; racing
+        // two walks could let the older result overwrite the newer one.
+        if loadPhase != nil || scanTask != nil {
+            watcherRescanPending = true
+            return
+        }
+
+        watcherRescanTask?.cancel()
+        let sort = photoSort
+        watcherRescanTask = Task { @MainActor [weak self] in
+            let urls = await Self.walkAndSort(root, recursive: recursive, sort: sort)
+            guard let self, !Task.isCancelled else { return }
+            guard self.scanGeneration == generation,
+                  self.folder == root,
+                  self.loadedRecursively == recursive else { return }
+            guard self.folderContinuityIsCurrent(at: root) else {
+                self.closeForFolderContinuityLoss(at: root)
+                return
+            }
+            // Navigation can continue while the filesystem walk is suspended.
+            // Remap the selection that is current *now*, rather than jumping
+            // back to whatever happened to be selected when the rescan began.
+            let latestURL = self.currentURL
+            let committedURLs = self.photoSort == sort
+                ? urls
+                : Self.sortPhotos(urls, by: self.photoSort, basePath: root.path)
+            let removedURLs = Set(self.imageURLs).subtracting(committedURLs)
+            self.imageURLs = committedURLs
+            self.selection.adjustAfterRemoval(
+                removedURLs: removedURLs,
+                previousURL: latestURL
+            )
+        }
+    }
+
+    /// FSEvents watches the whole subtree even when the grid is intentionally
+    /// showing only direct children. Preserve those deeper events for search
+    /// freshness, but narrow the expensive browser reconciliation to paths a
+    /// nonrecursive directory listing could actually include.
+    private func viewerRelevantBatch(
+        _ batch: RecursiveFolderChangeBatch,
+        root: URL,
+        recursive: Bool
+    ) -> RecursiveFolderChangeBatch? {
+        if recursive || batch.requiresFullRescan { return batch }
+
+        let paths = FolderPathMapper(rootURL: root)
+        let normalizedRoot = paths.rootPath
+
+        let changedURLs = batch.changedURLs.filter { url in
+            let path = paths.pathRebasedToRoot(for: url)
+            if path == normalizedRoot { return true }
+            let candidate = URL(fileURLWithPath: path)
+            guard candidate.deletingLastPathComponent().path == normalizedRoot else {
+                return false
+            }
+            return Self.imageExtensions.contains(candidate.pathExtension.lowercased())
+        }
+        guard !changedURLs.isEmpty else { return nil }
+        return RecursiveFolderChangeBatch(
+            changedURLs: changedURLs,
+            requiresFullRescan: false
+        )
+    }
+
+    /// URL lists do not reveal same-path overwrites. Evict every cache entry
+    /// named by the FSEvents batch (or the whole generation when events were
+    /// coalesced/dropped) before SwiftUI restarts visible thumbnail/detail
+    /// tasks with the new content revision.
+    private func invalidateMediaCaches(
+        for batch: RecursiveFolderChangeBatch,
+        root: URL
+    ) {
+        // Large file-level batches make per-path prefix matching quadratic in
+        // library size. Clearing bounded caches is both faster and safer; only
+        // visible cells are decoded again after the revision changes.
+        if batch.requiresFullRescan || batch.changedURLs.count > 32 {
+            ThumbnailLoader.shared.clear()
+            prefetcher.clear()
+            selectedMediaContentTick &+= 1
+            return
+        }
+
+        let paths = FolderPathMapper(rootURL: root)
+
+        let changedPaths = Set(batch.changedURLs.map {
+            paths.pathRebasedToRoot(for: $0)
+        })
+        let changedPrefixes = changedPaths.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        let selectedPath = currentURL.map { paths.pathRebasedToRoot(for: $0) }
+        var selectedWasAffected = false
+
+        for url in imageURLs {
+            let path = paths.pathRebasedToRoot(for: url)
+            let affected = changedPaths.contains(path)
+                || changedPrefixes.contains { path.hasPrefix($0) }
+            guard affected else { continue }
+            ThumbnailLoader.shared.evict(url: url)
+            prefetcher.evict(url: url)
+            if path == selectedPath { selectedWasAffected = true }
+        }
+        if selectedWasAffected { selectedMediaContentTick &+= 1 }
     }
 
     // MARK: - Selection delegation
@@ -605,6 +1003,20 @@ final class AppState {
     func selectFirst() { selection.selectFirst() }
     func selectLast() { selection.selectLast() }
     func select(url: URL) { selection.select(url: url) }
+
+    /// Revalidate immediately before any user/phone interaction that may
+    /// mutate or persist folder-scoped state. FSEvents is deliberately
+    /// debounced, so the watcher alone cannot close the same-path replacement
+    /// window quickly enough to protect a culling write.
+    @discardableResult
+    func ensureActiveFolderContinuity() -> Bool {
+        guard let folder else { return false }
+        guard folderContinuityIsCurrent(at: folder) else {
+            closeForFolderContinuityLoss(at: folder)
+            return false
+        }
+        return true
+    }
 
     // MARK: - Vim action dispatch
 
@@ -625,6 +1037,11 @@ final class AppState {
         case .jumpToMark(let c):
             if let url = vimKeymap.marks[c] { select(url: url) }
         case .setColorLabel, .togglePick, .toggleReject:
+            guard ensureActiveFolderContinuity() else { return }
+            guard !isCullingPersistenceBlocked else {
+                reportBlockedCullingEdit()
+                return
+            }
             if let folder { vimKeymap.saveInBackground(folder: folder) }
             // Both writers land here — the keyboard via BrowserView, the phone
             // via PhoneAccessController.apply — and both have already mutated
@@ -640,15 +1057,50 @@ final class AppState {
             }
         case .setMark:
             // Marks are Mac-only navigation; the phone has no concept of them.
+            guard ensureActiveFolderContinuity() else { return }
+            guard !isCullingPersistenceBlocked else {
+                reportBlockedCullingEdit()
+                return
+            }
             if let folder { vimKeymap.saveInBackground(folder: folder) }
         case .none:
             break
         }
     }
 
+    /// Persist the newest complete snapshot at lifecycle boundaries (folder
+    /// switch/close and app termination). This shares the same revisioned
+    /// serial writer as background edits, so an older queued write cannot land
+    /// afterward and replace it.
+    @discardableResult
+    func flushCullingState() -> Bool {
+        guard let folder,
+              !isBrowsingArchive,
+              !isCullingPersistenceBlocked else { return true }
+        guard vimKeymap.hasUnpersistedChanges else { return true }
+        guard folderContinuityIsCurrent(at: folder) else {
+            // There is no safe destination for state tied to a folder that no
+            // longer occupies this pathname. Close without resolving a new
+            // bookmark, which is the critical guarantee: old culls must never
+            // become the replacement folder's state.
+            closeForFolderContinuityLoss(at: folder)
+            return true
+        }
+        do {
+            try vimKeymap.save(folder: folder)
+            return true
+        } catch {
+            // Keep the current keymap alive. Folder switches and close actions
+            // use this return value as a barrier so the only complete snapshot
+            // is never discarded after a failed lifecycle save.
+            return false
+        }
+    }
+
     func stopWatching() {
-        fileWatcher?.cancel()
-        fileWatcher = nil
+        folderChangeWatcher?.stop()
+        folderChangeWatcher = nil
+        watcherRescanPending = false
         watcherRescanTask?.cancel()
         watcherRescanTask = nil
     }
@@ -744,14 +1196,17 @@ final class AppState {
 
         if let currentFolder = folder,
            currentFolder.path == trashedPath || currentFolder.path.hasPrefix(prefix) {
-            closeFolder()
+            // The source no longer exists, so its already-queued snapshot is
+            // the last meaningful one; a new identity lookup cannot help.
+            closeFolder(persistCulling: false)
         }
     }
 
     /// Close the current album: drop selection + URL list, swap back to the
     /// empty state. Called by the double-Escape shortcut. Doesn't clear
     /// recents — the folder stays in MRU so re-opening is one click away.
-    func closeFolder() {
+    func closeFolder(persistCulling: Bool = true) {
+        if persistCulling, !flushCullingState() { return }
         scanGeneration &+= 1
         // Cancel any in-flight scan first so a slow recursive walk doesn't
         // keep churning fs reads after the user closes the folder.
@@ -760,6 +1215,7 @@ final class AppState {
         archiveExtractionTask?.cancel()
         archiveExtractionTask = nil
         stopWatching()
+        loadedFolderContinuity = nil
         let extractionToRemove = extractedArchiveDir
         extractedArchiveDir = nil
         isBrowsingArchive = false
@@ -773,6 +1229,11 @@ final class AppState {
         folder = nil
         anchorFolder = nil
         imageURLs = []
+        vimKeymap = VimKeymap()
+        isCullingPersistenceBlocked = false
+        pendingUnverifiedCullingFolder = nil
+        searchResultURLs = nil
+        isSearchFieldFocused = false
         selection.reset()
         photoFilter = .all
         loadPhase = nil
@@ -797,8 +1258,8 @@ final class AppState {
         }
     }
 
-    // Note: no deinit cancel of fileWatcher — main-actor isolation prevents
-    // accessing it from a nonisolated deinit. The AppState lives for the
-    // lifetime of the app in this minimal version, so OS cleans up at exit.
-    // Call stopWatching() explicitly when migrating to a multi-window app.
+    // Note: no deinit cancellation of the folder watchers — main-actor
+    // isolation prevents accessing them from a nonisolated deinit. AppState
+    // lives for the app's lifetime in this single-window version, so the OS
+    // cleans up at exit. Call stopWatching() explicitly if that changes.
 }

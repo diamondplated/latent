@@ -41,6 +41,7 @@ struct KeyboardShortcutOverlay: View {
             ("Drag", "Pan"),
         ]),
         ("Actions", [
+            ("⌘F", "Search this folder"),
             ("⌫", "Move to Trash"),
             ("⌘Z", "Undo Trash"),
             ("⌘S", "Export enhanced copy"),
