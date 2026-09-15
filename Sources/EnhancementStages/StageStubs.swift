@@ -21,7 +21,7 @@ public struct ArtifactRemoval: Stage {
     public let displayName = "Artifact Removal"
     public init() {}
 
-    public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
+    public func process(input: ImageBuffer, params: Params, progress: PipelineCore.ProgressReporter) async throws -> ImageBuffer {
         let strength = normalizedUnitParameter(params.strength)
         if strength == 0 { return input }
         let restored = try await runModelOrPassthrough(
@@ -52,7 +52,7 @@ public struct Denoise: Stage {
     public let displayName = "Denoise"
     public init() {}
 
-    public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
+    public func process(input: ImageBuffer, params: Params, progress: PipelineCore.ProgressReporter) async throws -> ImageBuffer {
         let strength = normalizedUnitParameter(params.strength)
         if strength == 0 { return input }
         let denoised = try await runModelOrPassthrough(
@@ -94,7 +94,7 @@ public struct Upscale: Stage {
     public let displayName = "Upscale"
     public init() {}
 
-    public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
+    public func process(input: ImageBuffer, params: Params, progress: PipelineCore.ProgressReporter) async throws -> ImageBuffer {
         progress.report(0.0)
         defer { progress.report(1.0) }
 
@@ -169,7 +169,7 @@ public struct Sharpen: Stage {
     public let displayName = "Sharpen"
     public init() {}
 
-    public func process(input: ImageBuffer, params: Params, progress: ProgressReporter) async throws -> ImageBuffer {
+    public func process(input: ImageBuffer, params: Params, progress: PipelineCore.ProgressReporter) async throws -> ImageBuffer {
         progress.report(0.0)
         defer { progress.report(1.0) }
 
