@@ -212,11 +212,13 @@ files.
 ## Requirements
 
 - macOS 14 or newer to run.
-- **A recent macOS SDK to build.** The code uses APIs that are not present in older SDKs; CI builds
-  against macOS 15. If you are on an older Xcode you may hit compile errors in the CoreGraphics and
-  CoreML bridges.
-- Full Xcode (not just CommandLineTools) for `swift test`. `swift run pv-pipeline` runs anywhere and
-  provides broad executable verification without XCTest.
+- **A recent macOS SDK to build.** The code uses APIs that are not present in older SDKs; releases
+  and CI build against the macOS 27 SDK (Xcode 27). If you are on an older Xcode you may hit compile
+  errors in the CoreGraphics and CoreML bridges.
+- Full Xcode (not just the Command Line Tools). From the macOS 27 SDK on, SwiftUI's property-wrapper
+  macros ship only inside Xcode, so the app target no longer compiles with the Command Line Tools
+  alone; XCTest for `swift test` was always Xcode-only. `swift run pv-pipeline` still runs with the
+  Command Line Tools and provides broad executable verification without XCTest.
 
 ---
 
