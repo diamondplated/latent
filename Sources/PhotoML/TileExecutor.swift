@@ -72,7 +72,7 @@ public struct TileExecutor: Sendable {
 
     public func execute(
         input: ImageBuffer,
-        progress: ProgressReporter = .noop,
+        progress: PipelineCore.ProgressReporter = .noop,
         process: @Sendable (ImageBuffer) async throws -> ImageBuffer
     ) async throws -> ImageBuffer {
         precondition(input.format == .working, "TileExecutor requires working format")

@@ -15,7 +15,7 @@ func runModelOrPassthrough(
     modelID: ModelID,
     spec: TensorSpec,
     tileSize: Int,
-    progress: ProgressReporter
+    progress: PipelineCore.ProgressReporter
 ) async throws -> ImageBuffer {
     let model = try await ModelManager.shared.model(for: modelID, spec: spec)
     guard let model else {
