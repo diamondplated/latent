@@ -25,7 +25,7 @@ swift test                 # XCTest; needs full Xcode
 ## Layout
 
 - `PipelineCore`: `Stage` protocol, chain executor, `IntermediateCache` actor, sidecars, `ImageBuffer`.
-- `EnhancementStages`: the four stages (in `StageStubs.swift`, despite the name).
+- `EnhancementStages`: the four stages (`Stages.swift`) and their helpers.
 - `PhotoIO`: reader/writer, EXIF, folder watching, archive extraction.
 - `PhotoML`: tiling, CoreML wrappers, model registry.
 - `PhotoSearch`: CLIP encoders, BPE tokenizer, per-folder embedding index.
