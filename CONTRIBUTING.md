@@ -51,9 +51,12 @@ and the trash flow all behave differently at a few thousand images than they do 
 - `EnhancementStages` — the four stages, each model-aware with a documented fallback.
 - `PhotoIO` — reader/writer, EXIF round-trip, orientation baked into pixels before the pipeline sees
   them, colour-space awareness.
-- `PhotoML` — tiling with feathered seams, CoreML wrappers, model registry with negative caching,
-  Vision face detection.
+- `PhotoML` — tiling with feathered seams, CoreML wrappers, model registry with negative caching.
+- `PhotoViewerCore` — the vim keymap and durable culling state, free of UI dependencies.
+- `PhotoGeo` — EXIF GPS extraction for the map view.
+- `PhotoServe` — the opt-in LAN server, address gate, pairing and the phone client.
 - `PhotoSearch` — embeddings, per-folder index, CLIP image and text encoders, Swift BPE tokenizer.
+- `PhotoQuickLook` — `QuickLookRenderer`, ready for an extension target that is not built yet.
 - `PhotoViewerApp` — the SwiftUI app.
 - `PipelineCLI` — `pv-pipeline`.
 
