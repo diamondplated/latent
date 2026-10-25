@@ -52,6 +52,7 @@ struct PipelineCLI {
         failures += await runVerification("Export Copy atomically keeps concurrent results", check: concurrentExportsKeepBoth)
         failures += await runVerification("reader bakes EXIF orientation into pixels (axes swap for orientation 6)", check: orientationBaking)
         failures += await runVerification("writer with preserveMetadata=false strips EXIF", check: privacyExportStripsMetadata)
+        failures += await runVerification("Export Copy's default options strip GPS, EXIF and TIFF tags", check: exportCopyStripsLocation)
         failures += await runVerification("TileExecutor single-tile fast path is exact identity", check: tileExecutorSingleTile)
         failures += await runVerification("TileExecutor multi-tile identity reproduces input within Float16 tolerance", check: tileExecutorMultiTileIdentity)
         failures += await runVerification("TileExecutor 2x upscale produces correct output dimensions", check: tileExecutorUpscaleDimensions)
@@ -583,6 +584,68 @@ func privacyExportStripsMetadata() async throws {
     // pixels), and there should be no carry-over of the original orientation.
     let (_, meta2) = try reader.read(url: out)
     try require(meta2.originalOrientation == .up, "preserveMetadata=false should still write orientation=up; got \(meta2.originalOrientation)")
+}
+
+/// The path Export Copy takes: `writeKeepingBoth` with the source metadata and
+/// default options. The fixture carries GPS, EXIF and TIFF tags, so a writer
+/// that copies them through fails here, which the orientation-only check
+/// above cannot catch.
+func exportCopyStripsLocation() async throws {
+    let src = tempURL("jpg")
+    let preferred = tempURL("jpg")
+    var written: URL?
+    defer {
+        try? FileManager.default.removeItem(at: src)
+        if let written { try? FileManager.default.removeItem(at: written) }
+    }
+
+    try writeJPEGWithIdentifyingMetadata(makeGradientCGImage(width: 32, height: 32), to: src)
+    let srcProps = try imageProperties(at: src)
+    try require(srcProps[kCGImagePropertyGPSDictionary] != nil, "fixture should carry GPS")
+
+    let (buffer, metadata) = try ImageReader().read(url: src)
+    let out = try ImageWriter().writeKeepingBoth(buffer: buffer, metadata: metadata, to: preferred)
+    written = out
+
+    let props = try imageProperties(at: out)
+    try require(props[kCGImagePropertyGPSDictionary] == nil, "export must not carry GPS")
+    let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+    try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "export must not carry the capture date")
+    let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+    try require(tiff?[kCGImagePropertyTIFFMake] == nil, "export must not carry the camera make")
+}
+
+func writeJPEGWithIdentifyingMetadata(_ cgImage: CGImage, to url: URL) throws {
+    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+        throw VerifyError(message: "could not create CGImageDestination at \(url.path)")
+    }
+    let props: [CFString: Any] = [
+        kCGImagePropertyGPSDictionary: [
+            kCGImagePropertyGPSLatitude: 37.7749,
+            kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 122.4194,
+            kCGImagePropertyGPSLongitudeRef: "W",
+        ] as [CFString: Any],
+        kCGImagePropertyExifDictionary: [
+            kCGImagePropertyExifDateTimeOriginal: "2024:06:01 12:00:00",
+        ] as [CFString: Any],
+        kCGImagePropertyTIFFDictionary: [
+            kCGImagePropertyTIFFMake: "TestCam",
+        ] as [CFString: Any],
+    ]
+    CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
+    if !CGImageDestinationFinalize(dest) {
+        throw VerifyError(message: "failed to finalize fixture JPEG with metadata")
+    }
+}
+
+func imageProperties(at url: URL) throws -> [CFString: Any] {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+    else {
+        throw VerifyError(message: "could not read image properties at \(url.path)")
+    }
+    return props
 }
 
 // MARK: - TileExecutor verifications

@@ -209,3 +209,71 @@ final class ImageWriterKeepBothTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty, "temporary export files should be removed after commit")
     }
 }
+
+final class ImageWriterPrivacyTests: XCTestCase {
+    /// Export Copy's call: source metadata, default options. Mirrors
+    /// `exportCopyStripsLocation` in `pv-pipeline`.
+    func testExportCopyDropsGPSExifAndTIFFTags() throws {
+        let fileManager = FileManager.default
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("latent-privacy-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let source = directory.appendingPathComponent("located.jpg")
+        let width = 16
+        let height = 16
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.5, green: 0.4, blue: 0.3, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            source as CFURL, UTType.jpeg.identifier as CFString, 1, nil
+        ))
+        let fixtureProperties: [CFString: Any] = [
+            kCGImagePropertyGPSDictionary: [
+                kCGImagePropertyGPSLatitude: 37.7749,
+                kCGImagePropertyGPSLatitudeRef: "N",
+                kCGImagePropertyGPSLongitude: 122.4194,
+                kCGImagePropertyGPSLongitudeRef: "W",
+            ] as [CFString: Any],
+            kCGImagePropertyExifDictionary: [
+                kCGImagePropertyExifDateTimeOriginal: "2024:06:01 12:00:00",
+            ] as [CFString: Any],
+            kCGImagePropertyTIFFDictionary: [
+                kCGImagePropertyTIFFMake: "TestCam",
+            ] as [CFString: Any],
+        ]
+        CGImageDestinationAddImage(destination, image, fixtureProperties as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        XCTAssertNotNil(try properties(at: source)[kCGImagePropertyGPSDictionary], "fixture should carry GPS")
+
+        let (buffer, metadata) = try ImageReader().read(url: source)
+        let exported = try ImageWriter().writeKeepingBoth(
+            buffer: buffer,
+            metadata: metadata,
+            to: directory.appendingPathComponent("located_enhanced.jpg")
+        )
+
+        let props = try properties(at: exported)
+        XCTAssertNil(props[kCGImagePropertyGPSDictionary], "export must not carry GPS")
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        XCTAssertNil(exif?[kCGImagePropertyExifDateTimeOriginal], "export must not carry the capture date")
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        XCTAssertNil(tiff?[kCGImagePropertyTIFFMake], "export must not carry the camera make")
+    }
+
+    private func properties(at url: URL) throws -> [CFString: Any] {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        return try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+    }
+}
