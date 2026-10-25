@@ -37,3 +37,6 @@ scripts/archs/__pycache__/
 Tests/Fixtures/*.heic
 Tests/Fixtures/*.jpg
 !Tests/Fixtures/.gitkeep
+
+# Release zips live on GitHub Releases, not in git.
+dist/

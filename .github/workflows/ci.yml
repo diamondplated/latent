@@ -16,6 +16,10 @@ concurrency:
 jobs:
   build:
     name: Build and self-verify
+    # The runner is a personal laptop and this repo is public, so a fork's
+    # pull request must never reach it. Fork PRs skip the job; same-repo
+    # branches, pushes to main and manual runs still build.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, air]
 
     timeout-minutes: 30
