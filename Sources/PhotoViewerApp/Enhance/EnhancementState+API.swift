@@ -311,10 +311,14 @@ extension EnhancementState {
 
         let writeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
             do {
+                // Metadata is still passed for the source format and colour
+                // space; `preserveMetadata: false` keeps EXIF and GPS out of
+                // the copy.
                 let destination = try writer.writeKeepingBoth(
                     buffer: buffer,
                     metadata: metadata,
-                    to: preferredDestination
+                    to: preferredDestination,
+                    options: ImageWriteOptions(preserveMetadata: false)
                 )
                 return .success(destination)
             } catch {

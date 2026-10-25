@@ -36,7 +36,8 @@ public struct ImageWriteOptions: Sendable {
     public var quality: Double
 
     /// If true, copy through EXIF/IPTC/GPS/etc. from the source metadata blob.
-    /// Set to false for "privacy export" mode.
+    /// Off by default: photos carry GPS coordinates, so keeping them has to be
+    /// asked for.
     public var preserveMetadata: Bool
 
     /// Output color space. If nil, mirrors the source color space.
@@ -45,7 +46,7 @@ public struct ImageWriteOptions: Sendable {
     public init(
         format: ImageFileFormat? = nil,
         quality: Double = 0.95,
-        preserveMetadata: Bool = true,
+        preserveMetadata: Bool = false,
         outputColorSpace: ColorSpaceTag? = nil
     ) {
         self.format = format
@@ -60,10 +61,10 @@ public struct ImageWriteOptions: Sendable {
 /// Pixel pipeline: buffer (linear sRGB float16) → CIImage → CGImage rendered
 /// in the destination color space at 8-bit per channel → CGImageDestination.
 ///
-/// Metadata pipeline: original CGImageSource properties (from the read) are
-/// copied through verbatim, with `kCGImagePropertyOrientation` overridden to
+/// Metadata pipeline: by default nothing from the source is copied except its
+/// format and colour space, and `kCGImagePropertyOrientation` is written as
 /// `.up` (since the reader baked rotation into pixels). Pass
-/// `preserveMetadata: false` to strip everything for privacy export.
+/// `preserveMetadata: true` to copy the original properties through verbatim.
 public struct ImageWriter: Sendable {
     public init() {}
 
