@@ -123,6 +123,7 @@ func addressGateAcceptsPrivateRanges() async throws {
         "172.16.0.1", "172.31.255.254",
         "192.168.1.20", "169.254.10.1",
         "::1", "fe80::1c2b:3d4e", "fd00::42",
+        "febf::1", "fc00::1", "FD12:3456::1",
         // IPv4-mapped IPv6, the form a dual-stack listener presents an
         // IPv4 peer in (Darwin included) — Task 5 stands up exactly this.
         "::ffff:192.168.1.20", "::ffff:127.0.0.1",
@@ -140,6 +141,9 @@ func addressGateRejectsPublicAddresses() async throws {
         "", "not-an-address", "999.999.999.999",
         "::ffff:8.8.8.8", "::FFFF:1.1.1.1",  // mapped prefix must not launder public addresses
         "+127.0.0.1",                        // leading '+' is not a real octet
+        // Printed addresses drop leading zeros: these are 00fd::, 0fe8:: and
+        // 0fc0::, which only look like ULA or link-local as text.
+        "fd::1", "fe8::1", "fc0::1", "fec0::1", "::",
     ]
     for host in denied {
         try require(!AddressGate.isPrivate(host), "\(host) must be refused")

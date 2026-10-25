@@ -2,10 +2,11 @@ import Foundation
 
 /// Refuses any peer that is not on a local network.
 ///
-/// The listener is already bound to a LAN interface, so this is the second
-/// of two locks rather than the only one. It exists because the cost of
-/// being wrong — a photo folder reachable from off-network — is high enough
-/// that one misconfigured router should not be sufficient to cause it.
+/// `LocalServer` listens on every non-cellular interface, so this check is
+/// what keeps the listener LAN-only; the pairing token is the lock behind it.
+/// The cost of being wrong — a photo folder reachable from off-network — is
+/// high enough that one misconfigured router should not be sufficient to
+/// cause it.
 public enum AddressGate {
     public static func isPrivate(_ host: String) -> Bool {
         // Strip an IPv6 zone index (fe80::1%en0) before parsing.
@@ -44,9 +45,16 @@ public enum AddressGate {
             return isPrivateIPv4(String(lower.dropFirst("::ffff:".count)))
         }
         if lower == "::1" { return true }                       // loopback
-        if lower.hasPrefix("fe8") || lower.hasPrefix("fe9")
-            || lower.hasPrefix("fea") || lower.hasPrefix("feb") { return true }  // fe80::/10
-        if lower.hasPrefix("fc") || lower.hasPrefix("fd") { return true }        // fc00::/7 ULA
+        // Compare the first group as a number, not as text. Leading zeros
+        // are dropped when an address is printed, so "fd::1" is 00fd::1 and
+        // "fe8::1" is 0fe8::1 — neither is ULA or link-local, but both
+        // strings start with the prefix a text match looks for.
+        let first = lower.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        guard (1...4).contains(first.count),
+              first.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+              let group = UInt16(first, radix: 16) else { return false }
+        if group & 0xffc0 == 0xfe80 { return true }             // fe80::/10 link-local
+        if group & 0xfe00 == 0xfc00 { return true }             // fc00::/7 ULA
         return false
     }
 }
