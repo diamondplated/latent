@@ -62,13 +62,18 @@ public enum ModelRegistry {
 
         // 2. Repo Resources/Models (when running from a checkout).
         // SourceFile-relative path: Sources/PhotoML/ModelRegistry.swift → ../../Resources/Models
-        let thisFile = URL(fileURLWithPath: #filePath)
-        let repoModels = thisFile
-            .deletingLastPathComponent()  // Sources/PhotoML
-            .deletingLastPathComponent()  // Sources
-            .deletingLastPathComponent()  // repo root
-            .appendingPathComponent("Resources/Models", isDirectory: true)
-        dirs.append(repoModels)
+        // Skipped inside an app bundle: #filePath is wherever the release was
+        // built, which may not exist on this Mac, and anyone able to create
+        // it could hand the app a model ahead of its own bundle.
+        if !Bundle.main.bundlePath.hasSuffix(".app") {
+            let thisFile = URL(fileURLWithPath: #filePath)
+            let repoModels = thisFile
+                .deletingLastPathComponent()  // Sources/PhotoML
+                .deletingLastPathComponent()  // Sources
+                .deletingLastPathComponent()  // repo root
+                .appendingPathComponent("Resources/Models", isDirectory: true)
+            dirs.append(repoModels)
+        }
 
         // 3. App bundle Resources (production builds).
         if let bundleResources = Bundle.main.resourceURL {
