@@ -244,15 +244,17 @@ latent/
 │   ├── PipelineCore/          Stage protocol, chain executor, cache, sidecar, ImageBuffer
 │   ├── EnhancementStages/     the four stages
 │   ├── PhotoIO/               reader/writer, EXIF round-trip, colour-space handling
-│   ├── PhotoML/               tiling, CoreML wrappers, model registry, face detect/composite
+│   ├── PhotoML/               tiling, CoreML wrappers, model registry
 │   ├── PhotoSearch/           embeddings, per-folder index, CLIP encoders, BPE tokenizer
 │   ├── PhotoServe/            LAN listener, routes, pairing, the phone client
+│   ├── PhotoViewerCore/       vim keymap and durable culling state
+│   ├── PhotoGeo/              EXIF GPS extraction for the map view
 │   ├── PhotoViewerApp/        the SwiftUI app
 │   ├── PhotoQuickLook/        QuickLookRenderer
 │   └── PipelineCLI/           pv-pipeline
 ├── Resources/Models/          .mlpackage files land here (gitignored)
 ├── scripts/                   model conversion + app packaging
-└── Tests/                     XCTest target
+└── Tests/                     XCTest targets (PipelineCoreTests, PhotoViewerCoreTests)
 ```
 
 > **On naming:** the SwiftPM package and most modules are still `PhotoViewer` / `Photo*` from before
