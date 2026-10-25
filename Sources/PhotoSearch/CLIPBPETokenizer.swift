@@ -269,13 +269,17 @@ public final class CLIPBPETokenizer: Sendable {
         if let envPath = ProcessInfo.processInfo.environment["PV_TOKENIZER_DIR"] {
             dirs.append(URL(fileURLWithPath: envPath, isDirectory: true))
         }
-        let thisFile = URL(fileURLWithPath: #filePath)
-        let repoTokenizer = thisFile
-            .deletingLastPathComponent()  // Sources/PhotoSearch
-            .deletingLastPathComponent()  // Sources
-            .deletingLastPathComponent()  // repo root
-            .appendingPathComponent("Resources/Tokenizer", isDirectory: true)
-        dirs.append(repoTokenizer)
+        // Checkout-relative, so skipped inside an app bundle: see
+        // ModelRegistry.searchDirectories.
+        if !Bundle.main.bundlePath.hasSuffix(".app") {
+            let thisFile = URL(fileURLWithPath: #filePath)
+            let repoTokenizer = thisFile
+                .deletingLastPathComponent()  // Sources/PhotoSearch
+                .deletingLastPathComponent()  // Sources
+                .deletingLastPathComponent()  // repo root
+                .appendingPathComponent("Resources/Tokenizer", isDirectory: true)
+            dirs.append(repoTokenizer)
+        }
         if let bundleResources = Bundle.main.resourceURL {
             dirs.append(bundleResources.appendingPathComponent("Tokenizer", isDirectory: true))
         }
