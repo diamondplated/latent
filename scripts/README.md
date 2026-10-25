@@ -40,8 +40,8 @@ python3 scripts/convert_realesrgan.py
 `requirements.txt` is the source of truth. Don't pin anything older to get past an error. `torch` is
 held at a version that clears CVE-2025-32434 (a `torch.load(weights_only=True)` bypass, which is
 exactly how these scripts load downloaded `.pth` files). `requirements.txt` explains the pin, and
-[SECURITY.md](../SECURITY.md) covers the advisory. `basicsr` was removed from the project on purpose,
-so don't reinstall it.
+[SECURITY.md](../SECURITY.md) covers the advisory. Packages that `requirements.txt` says were dropped
+stay dropped.
 
 ### If a conversion fails
 
