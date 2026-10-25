@@ -85,5 +85,10 @@ let package = Package(
             dependencies: ["PhotoViewerCore"],
             path: "Tests/PhotoViewerCoreTests"
         ),
+        .testTarget(
+            name: "PhotoServeTests",
+            dependencies: ["PhotoServe"],
+            path: "Tests/PhotoServeTests"
+        ),
     ]
 )
