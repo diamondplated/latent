@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **Latent has moved to [diamondplated/mac-apps](https://github.com/diamondplated/mac-apps/tree/main/Latent).**
+> This repository is archived and read-only. Its full history, tags (as `latent-v*`) and open
+> issues moved with it. Existing release downloads here keep working, and
+> `brew install --cask diamondplated/tap/latent` is unchanged.
+
 <p align="center">
   <img src="Resources/AppBundle/Latent.iconset/icon_256x256.png" width="144" alt="Latent app icon">
 </p>
